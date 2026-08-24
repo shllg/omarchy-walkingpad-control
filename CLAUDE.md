@@ -61,6 +61,26 @@ already caused, or nearly caused, a wrong design decision.
     SIGTERM. Note it also replaces Python's SIGINT handler, so no
     `KeyboardInterrupt` is raised anywhere afterwards.
 
+11. **START is required; setting a speed never starts a stopped belt.** The speed
+    command is stored (byte [14]) and the belt stays put. Answered on hardware.
+
+12. **The pad starts at ~3.5 km/h regardless of its stored speed**, and ignores
+    byte [14] when starting. The 0.5 km/h per-command clamp does NOT cover this —
+    it governs changes, not the pad's own start. Starting is two steps: `start`,
+    then the speed, inside the ~2 s window at `belt=running, speed=0.0`.
+
+13. **In `mode == standby` the pad ignores every motion command**, and the BLE
+    mode-switch opcode too. Only the panel's **M** button leaves standby. Tell the
+    user that by name; do not retry.
+
+14. **`belt` 9/8/7 is the 3-2-1 startup countdown**, not a fault. `belt == 0` is
+    stopped, confirmed by observation.
+
+15. **Byte [14] is the last BLE-commanded speed, not a target.** It reads 0.0 when
+    the speed was set at the panel, while the belt runs. Never render it as a
+    target. A stale frozen status snapshot can also survive an abrupt link loss —
+    do not conclude a command failed from reported speed alone.
+
 ## Hard constraints
 
 - **System python only** (`#!/usr/bin/python3`) and **no third-party runtime

@@ -33,7 +33,32 @@ In:
     {"cmd": "stop"}
 
 `speed` is the belt's **actual** speed and `target` is what was last commanded.
-They differ during a ramp, and that is not an error — see below.
+They differ during a ramp, and that is not an error — see below. `target` is
+`null` until something is commanded: attaching to a belt already running does not
+tell us what it was aimed at, and reporting 0.0 there would read as a stop.
+`pad_set_speed` is the pad's own stored value and is diagnostic only — it reads
+0.0 when the speed was set at the panel.
+
+## Starting the belt is the dangerous part
+
+⚠ **The pad starts at ~3.5 km/h regardless of the speed it has stored, and a speed
+command sent to a stopped belt does not start it** — the command is kept and the
+belt stays put. So starting is always two steps: `start`, then set the speed as
+soon as `belt` becomes `running`. There is roughly a two-second window at
+`belt: "running", speed: 0.0` before the pad accelerates.
+
+The per-command 0.5 km/h clamp does **not** protect this. It governs changes; the
+start speed is the pad's own. Anything offering a one-click start has to handle
+both steps or it puts 3.5 km/h under someone's feet.
+
+## The pad must be in manual mode
+
+In `mode: "standby"` the pad answers status queries but silently ignores start,
+stop and speed alike — and the BLE mode-switch command is ignored too, so nothing
+here can leave that state. **Only the M button on the panel can.** The bridge
+refuses motion commands in standby and says so, rather than writing into the void:
+
+    {"t":"error","code":"standby","msg":"pad is in standby and ignores commands; …"}
 
 ## Things that look like bugs and are not
 
