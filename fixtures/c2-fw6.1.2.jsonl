@@ -3,3 +3,8 @@
 {"hex":"f8a20119010003f5000046000528000002002afd","note":"2.5kmh t=1013s d=0.70km s=1320"}
 {"hex":"f8a20119010003f6000046000529000002002cfd","note":"2.5kmh t=1014s d=0.70km s=1321"}
 {"hex":"f8a204000200000000000000000000000000a8fd","note":"awake at panel, belt idle, mode standby, all counters zero"}
+{"hex":"f8a209000100006000000500006f1e000300a1fd","note":"startup countdown 3 (belt=09), manual, target 3.0"}
+{"hex":"f8a207000100006000000500006f1e0003009ffd","note":"startup countdown 1 (belt=07), manual, target 3.0"}
+{"hex":"f8a201140100006900000500007a14000300b7fd","note":"running converged on target: 2.0 actual, 2.0 target, 122 steps"}
+{"hex":"f8a201230100006500000500007414000300bcfd","note":"running 3.5 actual while target is 2.0 -- mid ramp-down"}
+{"hex":"f8a200000100007300000600008314000300b6fd","note":"belt=00 stopped after STOP wound down, target still 2.0"}

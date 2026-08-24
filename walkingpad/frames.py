@@ -25,9 +25,12 @@ STATUS_LEN  = 20             # measured: always 20 bytes on fw 6.1.2
 # Measured 2026-08-24: belt == 4 is what an awake pad reports while nobody is on
 # it -- speed 0.0, mode standby, all counters zero. It is named "idle" rather
 # than "standby" so it cannot be confused with the MODE of the same name. 0 is
-# documented upstream as "stopped" but has never been observed here, so do not
-# treat the two as interchangeable without measuring one.
-_BELT = {0: "stopped", 1: "running", 4: "idle"}
+# 0 is "stopped", now confirmed directly: it is what the pad reports in manual
+# mode with the belt still, and what it returns to after a STOP winds down.
+# Measured 2026-08-24: 9, 8, 7 are the 3-2-1 startup countdown the panel shows
+# after START. They last about a second each and decoded as "unknown" before.
+_BELT = {0: "stopped", 1: "running", 4: "idle",
+         9: "starting", 8: "starting", 7: "starting"}
 
 # Only "running" means the belt is moving. Callers gate on that, never on the
 # absence of a particular other value, so an unmapped state stays safe.
@@ -38,6 +41,7 @@ _MODE = {0: "auto", 1: "manual", 2: "standby"}
 class Status:
     belt: str
     speed_kmh: float
+    set_speed_kmh: float
     mode: str
     elapsed_s: int
     distance_km: float
@@ -91,10 +95,22 @@ def parse_status(data: bytes) -> Status | None:
     return Status(
         belt=_BELT.get(data[2], "unknown"),
         speed_kmh=data[3] / 10.0,
+        # Byte [14] is the speed most recently commanded OVER BLE, in tenths of
+        # a km/h: it echoed 0a -> 1.0, 0f -> 1.5, 1e -> 3.0 exactly, persists
+        # across connections, and a running belt converges to it when a fresh
+        # command is sent.
+        #
+        # It is NOT a general target, and must not be shown as one. It reads 0.0
+        # when the speed was set at the panel instead -- every frame from the
+        # first capture session shows 0.0 while the belt ran at 2.5 -- and the
+        # pad IGNORES it when starting a stopped belt, starting at its own speed.
+        set_speed_kmh=data[14] / 10.0,
         mode=_MODE.get(data[4], "unknown"),
         elapsed_s=int.from_bytes(data[5:8], "big"),
         # Measured: the distance counter is in 10 m units, so 69 -> 0.69 km.
         distance_km=int.from_bytes(data[8:11], "big") / 100.0,
         steps=int.from_bytes(data[11:14], "big"),
     )
-    # Bytes [14:18] are undecoded. [16] was constant 0x02 across every capture.
+    # Of bytes [14:18], [14] is the target speed above. [16] is NOT constant --
+    # it was 0x02 in the first captures, 0x03 once started and 0x00 while in
+    # standby, so it is some state byte. [15] and [17] stayed 0x00 throughout.

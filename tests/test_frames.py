@@ -59,3 +59,39 @@ def test_awake_idle_pad_decodes_as_idle():
     assert status.belt == "idle"
     assert status.speed_kmh == 0.0
     assert status.mode == "standby"
+
+
+def test_startup_countdown_decodes_as_starting():
+    # Measured: belt 9, 8, 7 are the panel's 3-2-1 countdown after START.
+    # These decoded as "unknown" before, i.e. the UI would show a fault while
+    # the pad was doing exactly what it was told.
+    for hexstr in ("f8a209000100006000000500006f1e000300a1fd",
+                   "f8a207000100006000000500006f1e0003009ffd"):
+        status = frames.parse_status(bytes.fromhex(hexstr))
+        assert status.belt == "starting"
+        assert status.speed_kmh == 0.0
+
+
+def test_stopped_belt_decodes_as_stopped():
+    status = frames.parse_status(
+        bytes.fromhex("f8a200000100007300000600008314000300b6fd"))
+    assert status.belt == "stopped"
+    assert status.speed_kmh == 0.0
+
+
+def test_set_speed_field_is_the_last_ble_command_not_a_target():
+    # Converged: actual == what we last commanded over BLE.
+    converged = frames.parse_status(
+        bytes.fromhex("f8a201140100006900000500007a14000300b7fd"))
+    assert converged.speed_kmh == 2.0 and converged.set_speed_kmh == 2.0
+
+    # Mid ramp-down: actual still 3.5 while the commanded value is already 2.0.
+    ramping = frames.parse_status(
+        bytes.fromhex("f8a201230100006500000500007414000300bcfd"))
+    assert ramping.speed_kmh == 3.5 and ramping.set_speed_kmh == 2.0
+
+    # Speed set at the PANEL leaves the field at 0.0 even at 2.5 km/h, which is
+    # why it must never be rendered as a target.
+    panel = frames.parse_status(
+        bytes.fromhex("f8a20119010003f0000045000522000002001efd"))
+    assert panel.speed_kmh == 2.5 and panel.set_speed_kmh == 0.0
