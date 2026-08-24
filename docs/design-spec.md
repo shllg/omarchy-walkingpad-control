@@ -224,7 +224,25 @@ Where the design needs a colour that carries meaning rather than decoration —
 belt running, link absent, refusal — it takes it from a semantic role (`accent`,
 `urgent`, `muted`), never from a chosen hue.
 
-### 5.6 Stats and visuals (Stage 2 scope, noted)
+### 5.6 Standby is a state the user must be told how to leave
+
+Measured: with `mode == standby` the pad answers status queries but silently
+ignores START, STOP and speed alike, and the BLE mode-switch command is ignored
+as well. **Nothing the plugin can send leaves standby** — it takes the panel's M
+button.
+
+So this is not an error to log, it is an instruction to display. The widget must
+say what it sees and what to do about it, naming the button:
+
+> Pad found, but it is in standby — press **M** on the panel to control it.
+
+The bridge already refuses motion commands in this state and emits
+`{"t":"error","code":"standby"}` with that wording, so the widget renders the
+reason rather than deriving it. Distinguish it clearly from `absent` (asleep,
+nothing to be done from here) and from `unavailable` (the phone app holds the
+single BLE connection).
+
+### 5.7 Stats and visuals (Stage 2 scope, noted)
 
 Beyond the minimum controls, the bar widget is to show session stats and some
 visual treatment of them. Not yet designed; recorded here so it is not lost.
@@ -258,6 +276,19 @@ The pad accepts unauthenticated commands and may have a person standing on it.
 4. **No blind writes.** If no status frame has arrived within 3 s, the service
    refuses to issue motion commands and shows a stale-link state.
 5. Absolute speed is clamped to a configurable `maxSpeed` (default 6.0 km/h).
+6. ⚠ **Starting is the biggest hazard, and the clamp does not cover it.** Measured
+   2026-08-24: the pad ramps to **~3.5 km/h on START regardless of the speed it has
+   stored**, and ignores a speed command issued while the belt is stopped. The
+   per-action clamp governs *changes*; this is the pad's own start behaviour and
+   sits outside it.
+
+   Therefore starting is a two-part action, and the service owns both parts: issue
+   `start`, then issue the intended speed as soon as `belt` becomes `running`.
+   There is a ~2 s window at `belt=running, speed=0.0` before the pad accelerates,
+   which is where the speed command must land. A UI that offers a bare "start" and
+   trusts the displayed speed setting is putting 3.5 km/h under someone's feet.
+7. **A stopped belt cannot be started by setting a speed** — the command is stored
+   and ignored. Only `start` starts it (open question 2, now answered).
 
 ## 7. Configuration
 
@@ -305,13 +336,22 @@ Marketplace submission is a PR adding the repo to `registry.json` in
 
 1. Does `keepLoaded: true` apply to `bar-widget` kind? The service must stay alive
    even if no bar shows the widget. Verify against the loader.
-2. **STILL OPEN.** Cold start: `walkingpad-controller` reports some models need
-   START before accepting a speed. Untested here — the belt was already running,
-   and answering it moves a belt. `docs/smoke-test.md` carries the procedure; it
-   decides whether §5.1 must issue `start` before its first speed change.
+2. ✅ **ANSWERED 2026-08-24: yes, START is required.** A speed command on a
+   stopped belt updates the pad's stored speed and does not move the belt.
+   Verified twice. §5.1 must issue `start` first, then set the speed — and must
+   do so promptly, because the pad starts at ~3.5 km/h on its own (§6.6).
 3. Child-lock interaction with remote commands: unknown.
-4. Mode semantics (`0`/`1`/`2`) beyond manual = 1: only manual observed.
-5. Bytes `[14:18]` of the status frame remain undecoded.
+4. Mode semantics: manual = 1 and standby = 2 are both confirmed. `0` (auto) is
+   still unobserved. ⚠ In standby the pad answers queries but ignores every motion
+   command, and **the BLE mode-switch opcode is ignored too** — only the panel's M
+   button leaves standby (§5.6).
+5. Byte `[14]` is decoded: the speed most recently commanded over BLE, which
+   reads 0.0 when the speed was set at the panel, so it is not a usable target.
+   `[16]` varies with state (0x02, 0x03, 0x00) and is still undecoded; `[15]` and
+   `[17]` were 0x00 in every capture.
+8. How long a stale status snapshot can survive an abrupt link loss, and what
+   clears it. Observed once: eight identical frames reporting a running belt that
+   was physically stopped.
 6. ~~Whether BlueZ-level connect and bleak's connect cooperate or contend.~~
    **DISSOLVED, not answered** (2026-08-24). The question presupposed two BLE
    stacks. Dropping bleak for Gio (ADR D-3) means the bridge is a BlueZ D-Bus
