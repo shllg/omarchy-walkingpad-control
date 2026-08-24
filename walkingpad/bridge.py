@@ -54,7 +54,12 @@ class Bridge:
         # what lets the whole command path be tested with no hardware present.
         self.transport = transport
         self.current_speed = 0.0
-        self.commanded_speed = 0.0
+        # None until we actually command something. The bridge routinely attaches
+        # to a belt already running -- started at the panel, or left running by an
+        # earlier session -- and reporting 0.0 there reads as "commanded to stop"
+        # while the belt does 3.5. We have no target until we set one; the wire
+        # carries null and the UI decides how to render "unknown".
+        self.commanded_speed = None
         self.belt = "unknown"
         self.mode = "unknown"
         self._last_status_at = 0.0

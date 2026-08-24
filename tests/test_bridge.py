@@ -1,3 +1,5 @@
+import json
+
 # tests/test_bridge.py
 from walkingpad.bridge import Bridge
 from walkingpad import frames
@@ -131,3 +133,24 @@ def test_stop_is_still_allowed_in_standby():
     b = make_bridge()
     b.mode = "standby"
     assert b.handle_command({"cmd": "stop"}) == frames.stop()
+
+
+def test_target_is_unknown_until_something_is_commanded():
+    # Seen live: the bridge attached to a belt already running at 3.5 and
+    # reported target 0.0, which reads as a commanded stop. We had commanded
+    # nothing, so the honest answer is null rather than a number we made up.
+    b = Bridge()
+    assert b.commanded_speed is None
+    emitted = []
+    b._write = emitted.append
+    b.on_notify(None, bytes.fromhex("f8a201140100006900000500007a14000300b7fd"))
+    assert json.loads(emitted[0])["target"] is None
+
+
+def test_target_is_reported_once_a_speed_is_commanded():
+    b = make_bridge()
+    b.handle_command({"cmd": "speed", "kmh": 2.5})
+    emitted = []
+    b._write = emitted.append
+    b.on_notify(None, bytes.fromhex("f8a201140100006900000500007a14000300b7fd"))
+    assert json.loads(emitted[0])["target"] == 2.5
