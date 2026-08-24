@@ -4,8 +4,8 @@ An Omarchy bar plugin that controls a KingSmith WalkingPad over BLE, with no ven
 app, no account, and no network access. Destined for its own marketplace listing.
 
 **Read `docs/design-spec.md` before changing anything.** `docs/protocol-evidence.md`
-records what was measured on real hardware and why. Current work is
-`docs/plans/2026-08-24-bridge-stage1.md`.
+records what was measured on real hardware and why. Stage 1 (the bridge) is
+complete — see `docs/plans/2026-08-24-bridge-stage1.md`. Stage 2 is the QML plugin.
 
 ## Non-obvious facts. Do not re-derive these, and do not "fix" them.
 
@@ -41,11 +41,38 @@ already caused, or nearly caused, a wrong design decision.
 7. **Never write to `f000ffc0-0451-4000-b000-000000000000`.** It is an unauthenticated
    TI-style OTA service. A bad image bricks the control board.
 
+8. **`belt == 4` is the awake-and-idle state**, and it is what the pad reports for
+   most of the time it is reachable at all. Mapped as `"idle"`. `belt == 0` is
+   documented upstream as "stopped" but has never been observed here — do not
+   assume the two are interchangeable. Only `"running"` means the belt is moving;
+   gate on that, never on the absence of some other value.
+
+9. **BlueZ's `Connected` property is NOT proof of a working link.** After an
+   ungraceful kill it kept reporting `Connected=True` for a radio link that was
+   already gone: `Connect` succeeded, services resolved, `StartNotify` succeeded
+   and every write returned without error, into nothing. A recent status frame is
+   the only real evidence — hence the 15 s watchdog. Corollary: **a connected pad
+   does not advertise**, so a stranded link can never be rediscovered, which is
+   why `find()` adopts an existing one.
+
+10. **Python signal handlers do not run under a GLib main loop.**
+    `g_main_loop_run()` blocks in C, so Ctrl-C did nothing at all and the bridge
+    polled straight through it. Use `GLib.unix_signal_add` sources for SIGINT and
+    SIGTERM. Note it also replaces Python's SIGINT handler, so no
+    `KeyboardInterrupt` is raised anywhere afterwards.
+
 ## Hard constraints
 
-- **System python only** (`#!/usr/bin/python3`) with `pacman -S python-bleak`.
-  Ruby, node and bun on this machine are mise-managed, and a mise config wipe would
-  unmount the bridge. See ADR D-2.
+- **System python only** (`#!/usr/bin/python3`) and **no third-party runtime
+  dependency at all.** BLE goes through `gi.repository.Gio` to BlueZ; both
+  `python-gobject` and `bluez` are in `omarchy-base.packages`. A plugin manifest
+  has no dependency field and no install hook, so any other package would become a
+  manual `pacman -S` the user must run before the plugin works. Never pip. Ruby,
+  node and bun here are mise-managed, and a mise config wipe would unmount the
+  bridge. See ADRs D-2 and D-3.
+- **The QML widget owns no colour.** Build on `qs.Commons` (Color, Style) and
+  `qs.Ui`; never hardcode a colour, size or radius, not even as a fallback. Omarchy
+  themes swap live and copying a value at construction breaks that. See §5.5.
 - **No hardcoded MAC.** Discovery matches the advertised FE00 service UUID first,
   falling back to a `KS-` name prefix.
 - **Plain constructs only.** No metaprogramming, no clever async beyond the poll loop.
@@ -58,6 +85,10 @@ already caused, or nearly caused, a wrong design decision.
 
 ## Testing
 
-Tasks 1–3 of the current plan need **no hardware** — the frame codec is tested
-against four real captured frames in `fixtures/`. Only the smoke test moves a belt,
-and it requires the operator to be standing clear.
+`python -m pytest tests/ -v` runs the whole suite with **no hardware** — the codec
+is tested against real captured frames in `fixtures/`, and the link watchdog
+against a fake transport. `pytest` is a dev-only dependency (`python-pytest`); the
+bridge itself does not need it.
+
+Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing
+clear. It also carries the open Q2 cold-start procedure.

@@ -2,21 +2,54 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> ## STATUS: COMPLETE (2026-08-24)
+>
+> All five tasks are implemented, committed and verified against a WalkingPad C2
+> on firmware 6.1.2. 36 tests pass with no hardware. **The plan text below is kept
+> as written for the record; where it disagrees with the code, the code is right.**
+> Five deviations, each forced by evidence rather than preference:
+>
+> 1. **Task 2 was rewritten onto `gi.repository.Gio` instead of bleak** (ADR D-3).
+>    A plugin manifest has no dependency field and no install hook, so bleak would
+>    have meant a manual `pacman -S` before the plugin worked at all. This also
+>    dissolved open question Q6.
+> 2. **Task 4 runs a GLib main loop, not asyncio**, which follows from 1: Gio
+>    delivers notifications as D-Bus signals, and bridging to asyncio needs
+>    `asyncio-glib`, which Omarchy does not ship. `handle_command`, `emit`,
+>    `on_notify` and `_poll_interval` are unchanged; `run()` and stdin reading are
+>    not.
+> 3. **`belt == 4` was added to the codec.** Measured live: it is the awake-and-idle
+>    state, so the plan's map decoded the pad's most common awake state as
+>    `"unknown"`.
+> 4. **A link watchdog was added** (ADR D-4). BlueZ reported `Connected=True` on a
+>    radio link that was already gone and swallowed every write. Fifteen seconds of
+>    silence now tears the link down and rescans.
+> 5. **SIGINT/SIGTERM are GLib signal sources**, and the staleness gate applies only
+>    to `speed` and `start`. Without the first, Ctrl-C did nothing; without the
+>    second, an unknown command answered "refusing to move the belt".
+>
+> Test count is 36, not the 25 predicted here — the extra 11 cover transport
+> predicates, link adoption and the watchdog.
+
 **Goal:** Build `walkingpad-bridge`, a standalone Python process that owns the BLE link to a KingSmith WalkingPad and exposes it as line-delimited JSON on stdio.
 
 **Architecture:** Three focused modules behind a thin entry point. `frames.py` is a pure, hardware-free codec for the WiLink protocol (this is where all the measured protocol knowledge lives). `transport.py` wraps bleak and knows nothing about WalkingPad semantics. `bridge.py` orchestrates: a 1 Hz poll loop, stdin commands, stdout status. No QML in this stage — the deliverable runs in a terminal.
 
-**Tech Stack:** System Python (`/usr/bin/python3`), `bleak` 3.0.2 from `extra/python-bleak`, `pytest`. No mise-managed runtimes.
+**Tech Stack:** System Python (`/usr/bin/python3`) and `gi.repository.Gio` talking
+to BlueZ over D-Bus — no third-party runtime dependency. `pytest` for development
+only. No mise-managed runtimes. *(Revised from bleak; see ADR D-3.)*
 
 **Spec:** `docs/design-spec.md` (see especially §2 verified facts, §4 the bridge, §6 safety, §12 ADRs D-1/D-2)
 
 ## Global Constraints
 
 - Shebang is exactly `#!/usr/bin/python3`. Never a mise runtime (ADR D-2).
-- Dependencies: `bleak` only. Install via `pacman -S python-bleak`, never pip.
-- **Always scan before connecting.** `BleakClient(<address>)` with no prior scan fails
-  with "device was not found", which is indistinguishable from a contention failure.
-  Use `BleakScanner.find_device_by_filter`. (protocol-evidence.md, tooling lessons)
+- Dependencies: none at runtime. `python-gobject` and `bluez` are already in
+  `omarchy-base.packages`. Never pip. *(Revised; see ADR D-3.)*
+- **Always scan before connecting.** Connecting to a device BlueZ has not seen
+  recently fails with "device was not found", which is indistinguishable from a
+  contention failure. The one exception is a link BlueZ is already holding, which
+  is adopted rather than rediscovered — a connected pad does not advertise.
 - **Status is poll-driven, not push.** Subscribing to FE01 and waiting yields nothing.
   Every frame is a reply to a query. The poll loop is load-bearing, not an optimisation.
 - **Reported speed is ACTUAL, not target.** The pad ramps at ~0.25 km/h/s and never ACKs.
@@ -230,6 +263,12 @@ git commit -m "feat(frames): WiLink codec verified against captured C2 frames"
 ---
 
 ### Task 2: BLE transport
+
+> ⚠ **SUPERSEDED.** Implemented on `gi.repository.Gio`, not bleak — see ADR D-3 and
+> `walkingpad/transport.py`. The interface below still holds except that the methods
+> are synchronous, `find()` takes a `should_continue` callable, `matches_walkingpad`
+> takes a BlueZ property dict, and `find_connected` / `find_advertising` /
+> `is_in_range` were added. The rationale in the step text stands.
 
 **Files:**
 - Create: `walkingpad/transport.py`
@@ -778,5 +817,8 @@ git commit -m "docs: README and hardware smoke-test checklist"
 - `--replay` mode (§4.4). Needed to develop QML without hardware; belongs with
   Stage 2 when there is a consumer for it.
 - QML service, bar widget, adoption UI, IpcHandler — all Stage 2.
-- Open questions Q2 (cold start) and Q6 (BlueZ/bleak cooperation) stay open;
-  both need the pad awake. Q2 in particular may change Task 4's `start` handling.
+- Open question Q2 (cold start) stays open — it needs an awake pad AND an operator
+  standing clear, because answering it moves a belt. The procedure is in
+  `docs/smoke-test.md`. It may still change Task 4's `start` handling.
+- Q6 (BlueZ/bleak cooperation) is **dissolved, not answered**: dropping bleak for
+  Gio means there is no second BLE stack to contend with.

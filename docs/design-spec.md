@@ -75,7 +75,7 @@ Three components, one process tree, no systemd unit, no root, no compiled binary
   │         Process ──stdio, JSON lines──┐                      │
   └──────────────────────────────────────┼──────────────────────┘
                                          ▼
-                            walkingpad-bridge  (Python + bleak)
+                            walkingpad-bridge  (system Python + Gio)
                                          │ GATT
                                          ▼
                                    FE01 / FE02
@@ -103,8 +103,9 @@ in a bar widget is indefensible. Documented in the README as a device property.
 
 ## 4. The bridge
 
-`bin/walkingpad-bridge` — Python 3.10+, `bleak`. A pure protocol codec with no
-knowledge of Quickshell.
+`bin/walkingpad-bridge` — system Python, talking to BlueZ over D-Bus through
+`gi.repository.Gio`. No third-party runtime dependency (ADR D-3). A pure protocol
+codec with no knowledge of Quickshell.
 
 ### 4.1 Interface
 
@@ -202,6 +203,48 @@ split with the bridge.
 - Matching on the advertised **service UUID** rather than the name is preferred
   because it identifies capability rather than a vendor naming convention.
 
+### 5.5 Theming — the plugin owns no colour
+
+**Hard constraint.** Omarchy's themes are a large part of why anyone uses it, and
+a widget that ignores them looks broken next to the built-ins. The widget must
+therefore not define a single colour, radius, font size or spacing of its own.
+
+- `import qs.Commons` for the `Color`, `Style`, `Util` and `Border` singletons.
+  Surface roles come from `Color`; every dimension comes from `Style`.
+- `import qs.Ui` and build on the pre-themed components rather than styling
+  primitives by hand.
+- **Never hardcode a colour, not even a fallback.** No `#rrggbb`, no named colour,
+  no `Qt.rgba` literal.
+- Theme switches are live: `Color.qml` reassigns its whole values object, so
+  bindings re-evaluate on their own. Copying a colour into a local property at
+  construction time breaks that and is the one easy way to get this wrong.
+- The shipped `weather-radar` plugin is the working precedent to read first.
+
+Where the design needs a colour that carries meaning rather than decoration —
+belt running, link absent, refusal — it takes it from a semantic role (`accent`,
+`urgent`, `muted`), never from a chosen hue.
+
+### 5.6 Stats and visuals (Stage 2 scope, noted)
+
+Beyond the minimum controls, the bar widget is to show session stats and some
+visual treatment of them. Not yet designed; recorded here so it is not lost.
+
+The bridge already emits everything needed per poll: `speed`, `target`, `belt`,
+`mode`, `time`, `dist_km`, `steps`. Open design questions:
+
+- Which figure earns the bar's scarce horizontal space when the belt is running,
+  and which move into the menu.
+- Whether a sparkline or progress arc is worth it in a bar-height strip, and how
+  it renders under a theme that has no accent contrast to spare.
+- Whether daily totals are accumulated locally. The pad's own counters reset, and
+  persisting anything means owning a state file, which is a new concern the bridge
+  currently does not have.
+- What the dormant state shows. It is the common case (§2.1) and must read as
+  deliberate rather than as a failed connection.
+
+All of it inherits §5.5: stats are rendered with `qs.Commons` and `qs.Ui`, with no
+colour of the plugin's own.
+
 ## 6. Safety model
 
 The pad accepts unauthenticated commands and may have a person standing on it.
@@ -249,7 +292,7 @@ omarchy-walkingpad/
   WalkingpadWidget.qml
   WalkingpadService.qml  pragma Singleton
   bin/walkingpad-bridge
-  protocols/{wilink,ftms}.py
+  walkingpad/{frames,transport,safety,bridge}.py
   fixtures/c2-fw6.1.2.jsonl
   README.md  LICENSE (MIT)
 ```
@@ -262,14 +305,18 @@ Marketplace submission is a PR adding the repo to `registry.json` in
 
 1. Does `keepLoaded: true` apply to `bar-widget` kind? The service must stay alive
    even if no bar shows the widget. Verify against the loader.
-2. Cold start: `walkingpad-controller` reports some models need START before
-   accepting a speed. Untested here — the belt was already running.
+2. **STILL OPEN.** Cold start: `walkingpad-controller` reports some models need
+   START before accepting a speed. Untested here — the belt was already running,
+   and answering it moves a belt. `docs/smoke-test.md` carries the procedure; it
+   decides whether §5.1 must issue `start` before its first speed change.
 3. Child-lock interaction with remote commands: unknown.
 4. Mode semantics (`0`/`1`/`2`) beyond manual = 1: only manual observed.
 5. Bytes `[14:18]` of the status frame remain undecoded.
-6. Whether BlueZ-level connect (via Quickshell) and bleak's connect cooperate or
-   contend. Expected to cooperate — bleak is a BlueZ D-Bus client — but unverified.
-   Attempted 2026-08-24; blocked because the pad had gone to sleep.
+6. ~~Whether BlueZ-level connect and bleak's connect cooperate or contend.~~
+   **DISSOLVED, not answered** (2026-08-24). The question presupposed two BLE
+   stacks. Dropping bleak for Gio (ADR D-3) means the bridge is a BlueZ D-Bus
+   client like every other client on the desktop, so there is no second stack to
+   contend with. Verified live end to end.
 7. How long until the pad sleeps, and whether anything short of physical
    interaction wakes it. Measured: once asleep it stops advertising entirely,
    so BLE cannot reach it at all.
@@ -306,13 +353,80 @@ least-used language. Mitigation is explicit and binding on the implementation:
 
 ### D-2 — Python is system python, never mise (2026-08-24)
 
-`/usr/bin/python3` plus `pacman -S python-bleak` (`extra/python-bleak 3.0.2-1`).
+`/usr/bin/python3`, with no third-party package at all (see ADR D-3 for how the
+dependency was removed entirely).
 
 Ruby, Node and Bun on this machine are all mise-managed. The os-configs CLAUDE.md
 documents a real, recurring failure in which concurrent `mise use -g` wipes the
 global config and unmounts every binary under a version pin. A bar widget must not
 inherit that failure mode. The bridge shebang is `#!/usr/bin/python3` and the
-plugin declares `python-bleak` as a system dependency.
+plugin has no system dependency to declare.
 
 This also matches the platform: Omarchy's own 422 scripts are 417 bash and 5
 python3, with zero ruby and zero node.
+
+### D-3 — Gio/BlueZ, not bleak (2026-08-24)
+
+**A plugin cannot install a dependency.** The manifest schema the shell enforces
+has `schemaVersion`, `id`, `name`, `version`, `kinds`, `entryPoints` and a
+`barWidget` block — and no dependency field. `omarchy plugin add` clones,
+validates, moves, rescans and enables; it never invokes a package manager, and
+there is no build, prepare or postinstall hook anywhere in the plugin lifecycle.
+
+So a bleak dependency is not a packaging detail. It is a manual
+`sudo pacman -S python-bleak` that every user must run before the plugin works at
+all, and a plugin that silently does nothing until an undocumented command is run
+is not the seamless install this is meant to be.
+
+`python-gobject` and `bluez` are both in `omarchy-base.packages`, so a Gio
+transport installs with zero extra steps. bleak is itself a BlueZ D-Bus client,
+so this removes a wrapper rather than replacing a stack — which is also what
+dissolves open question 6.
+
+Consequences, accepted:
+
+- The bridge runs a **GLib main loop, not asyncio.** Gio delivers notifications
+  as D-Bus signals dispatched by a GLib loop, and bridging that to asyncio needs
+  `asyncio-glib`, which Omarchy does not ship — reintroducing exactly the
+  manual-install problem this decision removes.
+- `find()` and `connect()` block that loop. They run only while disconnected,
+  when there is no live link to service and no belt under our control to stop.
+  The poll and command paths, which do answer for a belt, never block.
+- More lines of transport code than bleak's API would need. That is the price of
+  the dependency, and it is paid once.
+
+Alternatives weighed and rejected: **Node** is not in Omarchy at all, and on this
+machine node/npm/bun all resolve under mise — precisely D-2's failure mode. **Go**
+and **Rust** are not guaranteed present, so with no build step each would mean
+committing a prebuilt binary per release and architecture; Rust additionally trips
+the marketplace's `cargo-git-unpinned` automatic failure. **C++** has a guaranteed
+compiler, but QtBluetooth (`qt6-connectivity`) is not installed and is not a
+Quickshell dependency, so it would be another manual install, and raw BlueZ D-Bus
+in C++ is more code than Python for no gain. Measured: importing gi and connecting
+the system bus takes ~80 ms at ~30 MiB RSS. At 1 Hz over BLE, language performance
+is not a differentiator here — dependency-freedom is.
+
+### D-4 — A recent status frame is the only proof of a live link (2026-08-24)
+
+Measured: after an ungraceful kill, BlueZ reported `Connected=True` for a radio
+link that was already gone. `Connect` succeeded, services resolved, `StartNotify`
+succeeded and every write returned without error — into nothing.
+
+So link state is never inferred from BlueZ's `Connected` property. Fifteen seconds
+without a status frame tears the link down and rescans. This is the same principle
+the safety gate already rests on (§6): there is no ACK anywhere in this protocol,
+so a recent frame is the only evidence that a pad is listening.
+
+The watchdog clock is seeded from the **connect** time and never by crediting a
+fresh connection as though a frame had arrived — that would open the safety gate
+on a link that has never said anything.
+
+Two corollaries the QML side inherits:
+
+- **A connected pad does not advertise.** A link outlives the process that made
+  it, so an ungraceful exit strands the pad: discovery can never see it again.
+  The bridge adopts an existing BlueZ link instead of rediscovering it.
+- **Terminate the bridge with SIGTERM and let it exit.** SIGKILL leaves the
+  phantom link above. The bridge handles SIGTERM and SIGINT through GLib signal
+  sources and disconnects cleanly; a plain Python signal handler does not run at
+  all under a GLib main loop.
