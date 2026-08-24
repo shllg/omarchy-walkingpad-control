@@ -1,5 +1,11 @@
 # tests/test_transport.py
-from walkingpad.transport import matches_walkingpad, is_in_range, SERVICE_FE00
+from walkingpad.transport import (
+    SERVICE_FE00,
+    find_advertising,
+    find_connected,
+    is_in_range,
+    matches_walkingpad,
+)
 
 
 def test_matches_on_advertised_service_uuid():
@@ -33,3 +39,28 @@ def test_in_range_requires_a_live_rssi():
     assert is_in_range({"RSSI": -61})
     assert not is_in_range({})
     assert not is_in_range({"RSSI": None})
+
+
+def _objects(**props):
+    return {"/org/bluez/hci0/dev_X": {"org.bluez.Device1": props}}
+
+
+def test_adopts_a_link_bluez_already_holds():
+    # A connected pad stops advertising, so it has no RSSI. Requiring one here
+    # would strand the bridge after an ungraceful exit: discovery could never
+    # see the pad again, and the bar would read "absent" with the pad awake.
+    found = find_connected(_objects(Name="KS-BLC2", Connected=True, Address="AA:BB"))
+    assert found is not None and found.address == "AA:BB"
+
+
+def test_does_not_adopt_a_pad_that_is_merely_known():
+    assert find_connected(_objects(Name="KS-BLC2", Connected=False)) is None
+
+
+def test_does_not_adopt_a_connected_non_pad():
+    assert find_connected(_objects(Name="WH-1000XM4", Connected=True)) is None
+
+
+def test_advertising_search_requires_a_live_rssi():
+    assert find_advertising(_objects(Name="KS-BLC2", RSSI=-61)) is not None
+    assert find_advertising(_objects(Name="KS-BLC2")) is None

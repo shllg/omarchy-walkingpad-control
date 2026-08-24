@@ -87,6 +87,37 @@ def is_in_range(props: dict) -> bool:
     return props.get("RSSI") is not None
 
 
+def _device_from(path: str, props: dict) -> Device:
+    return Device(path,
+                  props.get("Address") or "",
+                  props.get("Name") or props.get("Alias") or "")
+
+
+def find_connected(objects: dict):
+    """A pad BlueZ is already holding a link to, or None.
+
+    Measured 2026-08-24: a BLE connection outlives the process that made it, so
+    an ungraceful exit leaves the pad connected. A CONNECTED PAD DOES NOT
+    ADVERTISE, so discovery can never find it again and the bar reads "absent"
+    with an awake pad in front of you. Adopting the existing link is the way out,
+    and RSSI is irrelevant here: the live connection is the proof of reach.
+    """
+    for path, ifaces in objects.items():
+        props = ifaces.get(DEVICE_IFACE)
+        if props and matches_walkingpad(props) and props.get("Connected"):
+            return _device_from(path, props)
+    return None
+
+
+def find_advertising(objects: dict):
+    """A pad advertising right now, or None. Requires a live RSSI."""
+    for path, ifaces in objects.items():
+        props = ifaces.get(DEVICE_IFACE)
+        if props and matches_walkingpad(props) and is_in_range(props):
+            return _device_from(path, props)
+    return None
+
+
 class Transport:
     def __init__(self):
         self._bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
@@ -132,10 +163,19 @@ class Transport:
             return False
 
     # -- discovery ---------------------------------------------------------
-    def find(self, timeout: float = 10.0):
+    def find(self, timeout: float = 10.0, should_continue=None):
         """Return a Device, or None. None is NORMAL: the pad sleeps and stops
-        advertising entirely when idle, and BLE cannot wake it."""
-        adapter = self._adapter_path(self._objects())
+        advertising entirely when idle, and BLE cannot wake it.
+
+        should_continue is polled between scan slices. A scan blocks the main
+        loop, so without it a shutdown signal waits out the whole window.
+        """
+        objects = self._objects()
+        adopted = find_connected(objects)
+        if adopted is not None:
+            return adopted
+
+        adapter = self._adapter_path(objects)
         self._call(adapter, ADAPTER_IFACE, "SetDiscoveryFilter",
                    GLib.Variant("(a{sv})", ({"Transport": GLib.Variant("s", "le")},)))
         try:
@@ -146,13 +186,12 @@ class Transport:
         try:
             deadline = time.monotonic() + timeout
             while True:
-                for path, ifaces in self._objects().items():
-                    props = ifaces.get(DEVICE_IFACE)
-                    if props and matches_walkingpad(props) and is_in_range(props):
-                        return Device(path,
-                                      props.get("Address") or "",
-                                      props.get("Name") or props.get("Alias") or "")
+                found = find_advertising(self._objects())
+                if found is not None:
+                    return found
                 if time.monotonic() >= deadline:
+                    return None
+                if should_continue is not None and not should_continue():
                     return None
                 time.sleep(SCAN_POLL_S)
         finally:
