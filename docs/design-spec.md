@@ -371,15 +371,17 @@ The pad accepts unauthenticated commands and may have a person standing on it.
    trusts the displayed speed setting is putting 3.5 km/h under someone's feet.
 7. **A stopped belt cannot be started by setting a speed** — the command is stored
    and ignored. Only `start` starts it (open question 2, now answered).
-8. ⚠⚠ **The belt starts by itself when someone stands on it.** Measured
-   2026-08-24: the pad detects load and runs its own countdown to start, with no
-   command from the plugin. Three consequences the UI cannot opt out of:
+8. ⚠⚠ **UNRESOLVED — a STOP sent to a stopped belt may START it.** Twice
+   observed, never yet tested deliberately; see `docs/protocol-evidence.md`.
+   Until it is settled, rule 4's "stop is always permitted" is **provisional**:
+   one of the two live possibilities is that firing stop blind starts the belt.
+   An earlier claim here that the pad auto-starts on load was wrong and is
+   retracted — the belt starts only from a command, the remote, or auto mode.
+   Meanwhile the derived rules hold regardless of the answer:
    - Never infer belt state from "we did not command it". The status stream is
      the only source of truth about whether the belt is moving.
-   - A stopped-but-awake pad in manual mode is a live machine. "Stopped" must not
-     be rendered as "safe" or "inert".
-   - **Never auto-retry a command on a timer.** A retry loop fights the auto-start
-     and produces an endless countdown-cancel-countdown cycle. Send once per user
+   - **Never auto-retry a command on a timer.** A retry loop produced an endless
+     countdown-cancel-countdown cycle on real hardware. Send once per user
      action and let the status stream report the result. §5.2's coalescing is a
      safety requirement for this reason, not an optimisation.
 9. **`stop` is exempt from every throttle**, including the repeat-suppression that

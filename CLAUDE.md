@@ -81,10 +81,11 @@ already caused, or nearly caused, a wrong design decision.
     target. A stale frozen status snapshot can also survive an abrupt link loss —
     do not conclude a command failed from reported speed alone.
 
-16. ⚠⚠ **The belt starts BY ITSELF when someone stands on it** — the pad detects
-    load and runs its own countdown, with no command from us. Never infer belt
-    state from "we did not command it"; the status stream is the only truth. A
-    stopped-but-awake pad in manual mode is a live machine.
+16. ⚠⚠ **UNRESOLVED: a STOP sent to a stopped belt may START it.** Seen twice,
+    never tested deliberately. Until settled, "stop is always permitted" is
+    PROVISIONAL. The belt does NOT auto-start on load — that claim was written
+    here in error on 2026-08-24 and retracted; it starts only from a command, the
+    remote, or auto mode. Never infer belt state from "we did not command it".
 
 17. **Never auto-retry a command on a timer.** A retry loop fights the auto-start
     above and produces an endless countdown-cancel-countdown cycle, which is
