@@ -4,6 +4,18 @@
 you set.** Stand clear of the pad before starting it. Do not run this while anyone
 is on the belt.
 
+## 0. The belt starts by itself
+
+⚠ **The pad detects someone standing on it and starts on its own**, with no
+command from anything here. A stopped-but-awake pad in manual mode is a live
+machine. Stand clear for every step below, and do not treat `belt: "stopped"` as
+"safe to step on".
+
+Corollary for anyone scripting against the bridge: **never re-send a command on a
+timer.** A retry loop fights the auto-start and produces an endless
+countdown-cancel-countdown cycle, beeping continuously. Send one command per
+action and read the status stream for the result.
+
 ## 1. Prerequisites
 
 The pad sleeps and stops advertising when idle, and **BLE cannot wake it.** Wake it
