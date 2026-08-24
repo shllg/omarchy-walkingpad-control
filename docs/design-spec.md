@@ -263,6 +263,88 @@ The bridge already emits everything needed per poll: `speed`, `target`, `belt`,
 All of it inherits §5.5: stats are rendered with `qs.Commons` and `qs.Ui`, with no
 colour of the plugin's own.
 
+### 5.8 Taper-to-stop, manual and goal-driven (deferred, noted)
+
+Not Stage 2. Recorded now because it changes the safety model, and must not be
+retrofitted casually.
+
+**The problem.** Stopping the belt abruptly leaves the walker dizzy. The desk in
+front of them never moved, so the sudden end of the leg motion is a change the
+balance system has to absorb all at once. Ending a walk should be a ramp, not a
+switch.
+
+**The primitive: taper to stop.** Walk the speed down across a window, then issue
+an explicit `stop` from the pad's lowest speed. The window is configurable,
+defaulting short enough to read as the end of the walk rather than a slow fade — a
+first guess is 60 s. Everything below is a way of triggering this one primitive.
+
+**Trigger 1 — manual, from the UI.** A "wind down" action alongside stop: the
+walker asks for the taper when they want it, with no goal armed and nothing to
+configure in advance. This is the smaller half of the feature and probably ships
+first, because it needs no counters, no persistence and no prediction — only the
+taper itself.
+
+⚠ It must be a *separate* action, never a replacement for stop. §6.2 makes right
+click mean stop at every level of the UI, and that gesture has to stay one
+unambiguous thing that halts the belt now. A UI where the stop affordance
+sometimes takes 60 s to stop the belt is a worse design than no taper at all.
+
+**Trigger 2 — a goal, armed before or during a walk.**
+
+- `stop at 5000 steps`
+- `stop in 10 minutes`
+- `stop at 30 minutes total` (cumulative, not this session)
+- the distance equivalents of each
+
+As the goal approaches, the goal fires the taper instead of a bare `stop`.
+
+**Why this is not a small feature.** Every write in the design today is
+user-initiated. Trigger 2 is the first thing that commands the belt on its own,
+and it does so while someone is standing on it. That inverts §6 rather than
+extending it, so the questions below precede any implementation.
+
+Open questions:
+
+- **The taper must never be a surprise.** A goal that fires unnoticed is a speed
+  change under someone's feet. The bar has to show an armed goal and its
+  countdown, and the taper needs a visible "slowing down" state of its own. This
+  question is why trigger 1 is the easy one: the walker asked for it, so it is
+  never a surprise.
+- **Whether a taper in progress is interruptible, and by what.** At minimum stop
+  must cut it short. Whether a speed change cancels it or rebases it is undecided.
+- **What happens when the link drops mid-taper.** §6.4 refuses motion commands on
+  a stale link, so the taper simply stalls, leaving the belt at whatever speed it
+  had reached. Stop is always permitted even on a stale link — but falling back to
+  an abrupt stop is precisely what this feature exists to prevent. Neither branch
+  is obviously right.
+- **Which counter the goal is measured against.** The pad's counters reset on
+  their own, so a goal must be a delta from when it was armed, and a mid-walk
+  reset has to be detected rather than read as the goal receding.
+- **`total` forces persistence.** A cumulative goal needs state that outlives the
+  process — the state file §5.7 already flags as a new concern — plus a definition
+  of "a day".
+- **Overshoot or undershoot.** A taper cannot both begin before the goal and reach
+  the goal at a standstill. The simplest honest rule is that the window is
+  expressed in the goal's own unit (the last 500 steps, the last 2 minutes) and
+  the number lands where it lands.
+- **Taper rate versus the pad's own ramp.** Reported speed is actual and the pad
+  glides ~0.25 km/h per second (fact 2), so a taper is a schedule of setpoints,
+  not continuous control. Whether it reuses `speedStep` or needs a gentler rate of
+  its own is untested.
+- **The pad's minimum speed is unmeasured.** The last rung before `stop` depends
+  on it.
+- **A manual override should cancel a goal.** If the walker changes speed at the
+  panel, byte [14] is not evidence (fact 15). The taper must work from actual
+  speed, and decide what human intervention means.
+- **Where the timer lives.** A goal that dies when the bar reloads is worse than
+  no goal, because the user is relying on it. That argues for the bridge, which
+  owns the poll loop and the only guaranteed clock — but D-1 scopes the bridge to
+  protocol, and a goal is policy. Unresolved, and entangled with open question 1
+  (`keepLoaded`). Trigger 1 does not have this problem: a manual taper is short
+  enough to live wherever the session lives.
+
+Config sketch, if built: `taperSec` · `taperStep` · `goalUnit` · `dailyResetHour`.
+
 ## 6. Safety model
 
 The pad accepts unauthenticated commands and may have a person standing on it.
@@ -304,6 +386,11 @@ The pad accepts unauthenticated commands and may have a person standing on it.
    applies to `speed` and `start`. With no ACK in the protocol a dropped write is
    invisible, and a second press is a person's only recovery; swallowing it leaves
    them on a moving belt. A spammed stop is merely noisy.
+
+Every rule above assumes the command came from a person. §5.8 sketches a
+taper-to-stop that a *goal* could fire on its own — the first autonomous writer
+in the design, aimed at a belt that by definition has someone on it. It is
+deferred, and this section has to be revisited before any of it is built.
 
 ## 7. Configuration
 
