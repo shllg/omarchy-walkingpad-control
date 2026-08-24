@@ -109,6 +109,14 @@ already caused, or nearly caused, a wrong design decision.
   themes swap live and copying a value at construction breaks that. See §5.5.
 - **No hardcoded MAC.** Discovery matches the advertised FE00 service UUID first,
   falling back to a `KS-` name prefix.
+- **No real device address in tracked content, ever.** Docs use the `<pad-addr>`
+  and `<adapter-addr>` placeholders; the real values live in
+  `docs/local-device.md`, which is gitignored. This laptop's adapter address was
+  committed and pushed public on 2026-08-24, then scrubbed from all 21 commits
+  with `git-filter-repo`. A force-push does NOT retract it — the pre-rewrite
+  SHAs still answered 200 on GitHub afterwards, so the cleanup needed a support
+  request on top. `tests/test_no_pii.py` guards this; it fails the suite on any
+  MAC-shaped string in a tracked file. Treat that failure as a stop, not a lint.
 - **Plain constructs only.** No metaprogramming, no clever async beyond the poll loop.
   Comments explain *why* and cite the measured fact they rest on (ADR D-1).
 - **Safety is not optional.** Stop is always permitted, including on a stale link.
