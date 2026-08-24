@@ -116,3 +116,7 @@ operator standing clear of the pad.
 - `docs/design-spec.md` — architecture, safety model, and decision records
 - `docs/protocol-evidence.md` — what was measured on real hardware, and why
 - `docs/smoke-test.md` — the hardware checklist
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
