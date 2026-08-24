@@ -112,3 +112,36 @@
   here**. Do not assume 0 and 4 are interchangeable.
 - Only `belt == "running"` means the belt is moving. Gate on that, never on the
   absence of some other value, so an unmapped state fails safe.
+
+## Bridge run against real hardware (2026-08-24)
+- Full path works: scan → connect → resolve → StartNotify → 1 Hz poll → clean
+  teardown. Nine polls, nine frames, one per query. **Fact 1 holds: nothing is
+  ever volunteered.**
+
+### ⚠ BlueZ `Connected` IS NOT PROOF OF A WORKING LINK
+- After a process was SIGKILLed, BlueZ still reported `Connected=True` for a
+  radio link that was already gone. `Device1.Connect` on it returned success,
+  `ServicesResolved` was true, characteristics resolved, `StartNotify` succeeded
+  and every `WriteValue` returned without error — **into nothing.** Zero frames.
+- The write blocked ~2.5 s each time, which is the only outward sign at all.
+- → the bridge cannot trust the `Connected` property. A **recent status frame is
+  the only evidence of a live link**, which is the same reason the safety gate
+  exists. Silence for 15 s now tears the link down and rescans.
+- → seed that watchdog from the CONNECT time, never by crediting a fresh
+  connection as though a frame had arrived — that would open the safety gate on
+  a link that has never said anything.
+
+### ⚠ Python signal handlers do not run under a GLib main loop
+- `g_main_loop_run()` blocks in C, so Python never reaches its SIGINT handler,
+  and a KeyboardInterrupt raised inside a GLib callback is swallowed rather than
+  unwinding the loop. **Measured: Ctrl-C did nothing and the bridge polled on.**
+- → register `GLib.unix_signal_add` sources for SIGINT and SIGTERM. Both then
+  exit rc=0 and disconnect cleanly.
+- → `GLib.unix_signal_add` also REPLACES Python's SIGINT handler, so no
+  KeyboardInterrupt is raised anywhere afterwards.
+- → SIGTERM matters as much as SIGINT: Quickshell terminates child processes,
+  and an ungraceful kill leaves the phantom link described above.
+- The `GLib.unix_signal_add` deprecation warning is not printed in practice:
+  it is a DeprecationWarning raised from an imported module, which the default
+  filter suppresses. The non-deprecated `GLibUnix.signal_add` needs a much newer
+  gobject-introspection, so the compatible call is the right one to ship.
