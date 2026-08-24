@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+"""Entry point for the WalkingPad bridge. See walkingpad/bridge.py."""
+import argparse, os, sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from walkingpad.bridge import Bridge
+from walkingpad.safety import Safety
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="WalkingPad BLE bridge (stdio JSON)")
+    ap.add_argument("--max-speed", type=float, default=6.0,
+                    help="absolute ceiling in km/h (spec §7)")
+    ap.add_argument("--max-step", type=float, default=0.5,
+                    help="largest speed change a single command may make")
+    args = ap.parse_args()
+    safety = Safety(max_speed=args.max_speed, max_step=args.max_step)
+    try:
+        Bridge(safety=safety).run()
+    except KeyboardInterrupt:
+        pass
