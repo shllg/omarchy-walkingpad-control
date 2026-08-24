@@ -86,3 +86,29 @@
   looks exactly like a contention failure but is not. The bridge MUST scan
   (`BleakScanner.find_device_by_filter`) before connecting, every time.
   This produced a false "Q6 = CONTEND" verdict that was wrong.
+
+## Gio/BlueZ transport verified (2026-08-24, live, belt idle)
+- Talking to BlueZ over `gi.repository.Gio` reaches the pad end to end: discovery,
+  `Device1.Connect`, `ServicesResolved`, characteristic lookup, `StartNotify`,
+  `WriteValue{type=command}`, `Disconnect`. Six polls produced six frames.
+- **Q6 IS DISSOLVED, not answered.** The question assumed two competing stacks.
+  bleak talks to BlueZ over this same D-Bus API, so there was never a second
+  stack — using Gio directly just removes the wrapper. There is nothing to contend.
+- ⚠ **A cached BlueZ device object is NOT evidence the pad is reachable.** BlueZ
+  keeps `/org/bluez/hci0/dev_*` long after a device stops advertising (the paired
+  WH-1000XM4 sits there permanently with `RSSI: None`). Discovery populates RSSI
+  from live advertisements and drops it when they stop, so **RSSI presence is the
+  reachability test**. Matching on name/UUID alone would make a sleeping pad look
+  present and every connect attempt fail.
+
+### NEW PROTOCOL FACT — belt == 4
+      f8 a2 04 00 02 00 00 00 00 00 00 00 00 00 00 00 00 00 a8 fd
+- Awake at the panel, nobody on the belt: `[2]=04`, speed 0.0, mode 02 standby,
+  every counter zero. 20 bytes, CRC valid — a normal frame, not corruption.
+- → **belt == 4 is the awake-and-idle state**, and it is the state the pad is in
+  most of the time it is reachable at all. Mapped as `"idle"`; deliberately not
+  "standby", which is already a MODE name.
+- `belt == 0` is documented upstream as "stopped" but has **never been observed
+  here**. Do not assume 0 and 4 are interchangeable.
+- Only `belt == "running"` means the belt is moving. Gate on that, never on the
+  absence of some other value, so an unmapped state fails safe.

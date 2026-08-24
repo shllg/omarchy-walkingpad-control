@@ -48,3 +48,14 @@ def test_rejects_frame_with_bad_crc():
 
 def test_rejects_truncated_frame():
     assert frames.parse_status(bytes.fromhex("f8a20119")) is None
+
+
+def test_awake_idle_pad_decodes_as_idle():
+    # Measured live 2026-08-24: an awake pad with nobody on it reports belt==4.
+    # Before this was mapped it decoded as "unknown", which would have shown the
+    # pad's most common awake state as a fault in the bar.
+    data = bytes.fromhex("f8a204000200000000000000000000000000a8fd")
+    status = frames.parse_status(data)
+    assert status.belt == "idle"
+    assert status.speed_kmh == 0.0
+    assert status.mode == "standby"

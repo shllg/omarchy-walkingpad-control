@@ -2,3 +2,4 @@
 {"hex":"f8a20119010003f30000460005260000020026fd","note":"2.5kmh t=1011s d=0.70km s=1318"}
 {"hex":"f8a20119010003f5000046000528000002002afd","note":"2.5kmh t=1013s d=0.70km s=1320"}
 {"hex":"f8a20119010003f6000046000529000002002cfd","note":"2.5kmh t=1014s d=0.70km s=1321"}
+{"hex":"f8a204000200000000000000000000000000a8fd","note":"awake at panel, belt idle, mode standby, all counters zero"}

@@ -21,7 +21,16 @@ STATUS_LEN  = 20             # measured: always 20 bytes on fw 6.1.2
 
 # Measured: belt == 1 while the belt is moving. An earlier guess of "starting"
 # was wrong; the live step counter advancing at belt==1 disproved it.
-_BELT = {0: "stopped", 1: "running"}
+#
+# Measured 2026-08-24: belt == 4 is what an awake pad reports while nobody is on
+# it -- speed 0.0, mode standby, all counters zero. It is named "idle" rather
+# than "standby" so it cannot be confused with the MODE of the same name. 0 is
+# documented upstream as "stopped" but has never been observed here, so do not
+# treat the two as interchangeable without measuring one.
+_BELT = {0: "stopped", 1: "running", 4: "idle"}
+
+# Only "running" means the belt is moving. Callers gate on that, never on the
+# absence of a particular other value, so an unmapped state stays safe.
 _MODE = {0: "auto", 1: "manual", 2: "standby"}
 
 
