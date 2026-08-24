@@ -120,9 +120,16 @@ class Bridge:
             return None
         self._last_command = (cmd, now)
 
-        # Stop is exempt from every remaining gate. If we are unsure of the
-        # state, the safe action is still to stop, never to refuse.
+        # ⚠ Stop is NOT unconditional, because the stop opcode is a toggle that
+        # STARTS a stopped belt (measured 2026-08-25; see frames.stop). Firing it
+        # without evidence of motion is firing a start.
         if cmd == "stop":
+            if not self.safety.may_stop(self.belt, self.current_speed,
+                                        self._last_status_age()):
+                self.emit({"t": "error", "code": "stop_unsafe",
+                           "msg": "no recent evidence the belt is moving; sending "
+                                  "stop could start it. Use the panel or remote."})
+                return None
             self.commanded_speed = 0.0
             return frames.stop()
 

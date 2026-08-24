@@ -35,3 +35,22 @@ class Safety:
 
     def may_move(self, last_status_age_s: float) -> bool:
         return last_status_age_s <= self.stale_after_s
+
+    def may_stop(self, belt: str, speed_kmh: float, last_status_age_s: float) -> bool:
+        """Whether it is safe to SEND the stop opcode.
+
+        ⚠ This gate exists because the stop opcode is a TOGGLE: measured
+        2026-08-25, sending it to a stopped belt STARTS it, countdown and all.
+        An earlier version of this file said stop was always permitted including
+        on a stale link. That was exactly backwards -- with no recent frame we do
+        not know which way the toggle will go, and half the outcomes start a
+        treadmill nobody asked to start.
+
+        So stopping requires recent evidence that the belt is actually moving.
+        When that evidence is missing the honest answer is to refuse and say so:
+        the panel and the remote still stop the belt, and telling the user to use
+        them beats firing a command that may start it.
+        """
+        if last_status_age_s > self.stale_after_s:
+            return False
+        return belt in ("running", "starting") or speed_kmh > 0

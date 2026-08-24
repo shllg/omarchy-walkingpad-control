@@ -84,8 +84,11 @@ surface, not a fault to retry into.
 
 ## Safety
 
-- **Stop is always permitted**, including on a stale link. If the state is
-  unknown, stopping is still the safe action.
+- ⚠ **Stop is NOT unconditional.** The pad's stop opcode is a toggle: it stops a
+  running belt and **starts a stopped one**. Stopping is therefore only sent when
+  a recent frame shows the belt moving or counting down. Without that evidence the
+  bridge refuses and says so — the panel and remote always work. An earlier
+  version of this file claimed stop was always safe; it was wrong.
 - Everything that moves the belt is refused unless a status frame arrived
   recently. Without an acknowledgement in the protocol, a recent frame is the
   only evidence there is a live pad on the other end.

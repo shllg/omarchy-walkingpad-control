@@ -356,7 +356,8 @@ The pad accepts unauthenticated commands and may have a person standing on it.
 3. **Per-action speed delta is clamped** (default 0.5 km/h, configurable). One
    gesture cannot take a walker from 2.5 to 6.0 km/h.
 4. **No blind writes.** If no status frame has arrived within 3 s, the service
-   refuses to issue motion commands and shows a stale-link state.
+   refuses to issue motion commands and shows a stale-link state. ⚠ **This now
+   includes stop** — see rule 10.
 5. Absolute speed is clamped to a configurable `maxSpeed` (default 6.0 km/h).
 6. ⚠ **Starting is the biggest hazard, and the clamp does not cover it.** Measured
    2026-08-24: the pad ramps to **~3.5 km/h on START regardless of the speed it has
@@ -371,19 +372,20 @@ The pad accepts unauthenticated commands and may have a person standing on it.
    trusts the displayed speed setting is putting 3.5 km/h under someone's feet.
 7. **A stopped belt cannot be started by setting a speed** — the command is stored
    and ignored. Only `start` starts it (open question 2, now answered).
-8. ⚠⚠ **UNRESOLVED — a STOP sent to a stopped belt may START it.** Twice
-   observed, never yet tested deliberately; see `docs/protocol-evidence.md`.
-   Until it is settled, rule 4's "stop is always permitted" is **provisional**:
-   one of the two live possibilities is that firing stop blind starts the belt.
-   An earlier claim here that the pad auto-starts on load was wrong and is
-   retracted — the belt starts only from a command, the remote, or auto mode.
-   Meanwhile the derived rules hold regardless of the answer:
-   - Never infer belt state from "we did not command it". The status stream is
-     the only source of truth about whether the belt is moving.
-   - **Never auto-retry a command on a timer.** A retry loop produced an endless
-     countdown-cancel-countdown cycle on real hardware. Send once per user
-     action and let the status stream report the result. §5.2's coalescing is a
-     safety requirement for this reason, not an optimisation.
+8. ⚠⚠ **The stop opcode is a TOGGLE — it starts a stopped belt.** Confirmed
+   2026-08-25 by controlled test (`docs/protocol-evidence.md`). Never infer belt
+   state from "we did not command it"; the status stream is the only truth.
+10. ⚠⚠ **Stopping is gated on evidence of motion.** `Safety.may_stop()` requires a
+   recent frame showing the belt `running` or `starting`, or a non-zero speed. An
+   earlier version of this spec said stop was always permitted including on a
+   stale link; that was exactly backwards and is retracted. When the evidence is
+   missing the UI must say so and point at the panel and remote, which always
+   work. Stopping during the `starting` countdown IS permitted — that is when it
+   matters most.
+11. **Never auto-retry a command on a timer.** A retry loop produced an endless
+   countdown-cancel-countdown cycle on real hardware. Send once per user action
+   and let the status stream report the result. §5.2's coalescing is a safety
+   requirement for this reason, not an optimisation.
 9. **`stop` is exempt from every throttle**, including the repeat-suppression that
    applies to `speed` and `start`. With no ACK in the protocol a dropped write is
    invisible, and a second press is a person's only recovery; swallowing it leaves

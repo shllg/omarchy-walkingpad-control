@@ -23,9 +23,37 @@ def test_stop_command_encodes_stop():
     assert make_bridge().handle_command({"cmd": "stop"}) == frames.stop()
 
 
-def test_stop_is_allowed_even_on_a_stale_link():
+def test_stop_is_refused_on_a_stale_link():
+    # This test asserted the OPPOSITE until 2026-08-25, when a controlled test
+    # showed the stop opcode is a toggle that starts a stopped belt. With no
+    # recent frame we cannot tell which way it will go, and half the outcomes
+    # start a treadmill nobody asked to start.
     b = make_bridge()
     b._last_status_age = lambda: 99.0
+    emitted = []
+    b.emit = emitted.append
+    assert b.handle_command({"cmd": "stop"}) is None
+    assert [e["code"] for e in emitted] == ["stop_unsafe"]
+
+
+def test_stop_is_refused_when_the_belt_is_already_stopped():
+    b = make_bridge()
+    b.belt, b.current_speed = "stopped", 0.0
+    b.emit = lambda o: None
+    assert b.handle_command({"cmd": "stop"}) is None
+
+
+def test_stop_is_allowed_while_the_belt_is_running():
+    b = make_bridge()
+    b.belt, b.current_speed = "running", 2.5
+    assert b.handle_command({"cmd": "stop"}) == frames.stop()
+
+
+def test_stop_is_allowed_during_the_startup_countdown():
+    # Cancelling a countdown is the one moment stopping matters most: the belt
+    # is about to move and nobody may be ready for it.
+    b = make_bridge()
+    b.belt, b.current_speed = "starting", 0.0
     assert b.handle_command({"cmd": "stop"}) == frames.stop()
 
 

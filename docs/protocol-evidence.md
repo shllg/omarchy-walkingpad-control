@@ -203,42 +203,54 @@
   would fire falsely on exactly this data.
 - → open: how long the stale snapshot persists and what clears it. Seen once.
 
-## ⚠⚠ UNRESOLVED: a STOP sent to a stopped belt may START it (2026-08-24)
+## ⚠⚠ CONFIRMED: `F7 A2 04 00` IS A TOGGLE — IT STARTS A STOPPED BELT (2026-08-25)
 
-**Status: hypothesis, decisive test pending. Do not build on either answer yet.**
+**This is the most important fact in this document.** Controlled test, operator
+clear of the pad, hands off panel and remote:
 
-Two observations, both of which are a STOP arriving at a belt that was already
-stopped, followed by the pad running its 3-2-1 start countdown:
+      phase 1, 10 s, NOTHING sent   belt held at raw=0x00 stopped, mode manual
+      phase 2, ONE frame sent       F7 A2 04 00
+      the very next frame           raw=0x09  -> 08 -> 07 -> 01  (start countdown)
+      then                          ramped to 3.5 km/h, nobody on the pad
 
-1. A script re-sending STOP several times a second put the pad in a loop:
-   countdown, beep, cancel, double beep, countdown again, for as long as it ran.
-2. The bridge connected to a belt reporting `stopped` at `time=476`. Exactly one
-   STOP was sent (two more were suppressed). Four frames later: `starting`, then
-   `running` at 1.5 -> 1.7 km/h.
+The control phase rules out the pad starting on its own, and rules out the act of
+connecting as the trigger. One frame, immediate countdown.
 
-The counter-case is consistent rather than contradictory: one STOP to a RUNNING
-belt wound it down to 0.0 and it stayed there — but no further STOP followed.
+- On a **running** belt the same opcode stops it (wind-down measured repeatedly).
+- On a **stopped** belt it starts it.
+- So it is a run-state toggle, not a stop.
 
-### Two explanations were considered and BOTH were withdrawn
-- *"`A2 04 00` is a toggle"* — plausible, still unconfirmed. See below.
-- *"The pad auto-starts when it detects someone standing on it"* — **WRONG.** It
-  was briefly written into this log and the spec on 2026-08-24 and is retracted
-  here. The operator states plainly that the belt does not start on load: it
-  starts only from a command, the remote, or auto mode. This log recorded an
-  inference as a measurement, which is exactly what it exists to prevent.
+### This inverted the safety model
+The rule "stop is always permitted, including on a stale link" was written into
+the spec, CLAUDE.md and the tests. It was the single most dangerous line in the
+design: **without a recent frame we do not know which way the toggle goes, and
+half the outcomes start a treadmill.** `Safety.may_stop()` now requires recent
+evidence that the belt is actually moving, and refuses otherwise, telling the
+user to use the panel or remote — which always work.
 
-### The test that settles it
-Belt confirmed stopped, nobody on the pad, nobody touching panel or remote. Send
-exactly ONE `F7 A2 04 00` and watch. If a countdown follows, the hypothesis holds
-and the safety model below has to change. One further STOP then stops it.
+Stopping IS still permitted during the `starting` countdown. That is the moment
+it matters most: the belt is about to move and nobody may be ready for it.
 
-### Until it is settled
-Treat "send stop to a belt not known to be moving" as **unsafe**, because one of
-the two live possibilities is that it starts the belt. This directly contradicts
-the standing rule that stop is always permitted, so the rule is provisional until
-this is resolved.
+### Two earlier explanations, both wrong, both recorded rather than deleted
+- *"The pad auto-starts when someone stands on it."* WRONG. The operator states
+  plainly it does not; the belt starts from a command, the remote, or auto mode.
+  This log recorded an inference as a measurement, which is exactly what it
+  exists to prevent.
+- *"STOP was being ignored."* WRONG. It was a stale frozen snapshot; the operator
+  confirmed every stop had worked. Do not conclude a command failed from reported
+  speed alone.
 
-### Why STOP is exempt from repeat-suppression (unaffected by the above)
-- There is no ACK anywhere in this protocol, so a dropped write is invisible.
-- A person pressing stop a second time because nothing happened is the ONLY
-  recovery available to them. Swallowing that retry leaves them on a moving belt.
+### Follow-up worth doing
+Test whether `F7 A2 01 00` (set speed 0) stops a running belt. If it does, and if
+it is inert on a stopped belt, it is a strictly safer stop primitive than the
+toggle and should replace it.
+
+### Why STOP is still exempt from repeat-suppression
+- No ACK exists, so a dropped write is invisible, and a second press is the only
+  recovery a person has. It is gated on evidence of motion, never throttled.
+
+## Pad returns to standby on its own
+- Observed 2026-08-25: a pad left connected and idle drops back to `standby`
+  while still advertising and answering polls. Distinct from sleeping, where it
+  stops advertising entirely. A connected, healthy-looking link can therefore be
+  uncontrollable, and only the panel's M button restores manual mode.

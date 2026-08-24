@@ -81,11 +81,12 @@ already caused, or nearly caused, a wrong design decision.
     target. A stale frozen status snapshot can also survive an abrupt link loss —
     do not conclude a command failed from reported speed alone.
 
-16. ⚠⚠ **UNRESOLVED: a STOP sent to a stopped belt may START it.** Seen twice,
-    never tested deliberately. Until settled, "stop is always permitted" is
-    PROVISIONAL. The belt does NOT auto-start on load — that claim was written
-    here in error on 2026-08-24 and retracted; it starts only from a command, the
-    remote, or auto mode. Never infer belt state from "we did not command it".
+16. ⚠⚠ **`F7 A2 04 00` IS A TOGGLE: it STARTS a stopped belt.** Confirmed by
+    controlled test on 2026-08-25. Stopping is therefore gated on recent evidence
+    the belt is moving (`Safety.may_stop`); without it, refuse and point the user
+    at the panel. "Stop is always permitted on a stale link" was written here in
+    error and is retracted — it was the most dangerous line in the design. The
+    belt does NOT auto-start on load; that claim was also wrong and is retracted.
 
 17. **Never auto-retry a command on a timer.** A retry loop fights the auto-start
     above and produces an endless countdown-cancel-countdown cycle, which is

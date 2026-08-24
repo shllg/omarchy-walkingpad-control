@@ -77,6 +77,18 @@ def start() -> bytes:
 
 
 def stop() -> bytes:
+    """⚠ THIS OPCODE IS A TOGGLE. It stops a running belt and STARTS a stopped one.
+
+    Confirmed 2026-08-25 with a controlled test: ten seconds of polling a stopped
+    belt in manual mode with nothing sent (belt held at 0x00), then exactly one of
+    these frames -- and the very next frame was 0x09, the start countdown, ramping
+    to 3.5 km/h with nobody on the pad.
+
+    This module is a pure codec and holds no policy, so it still encodes what is
+    asked. Deciding whether sending it is SAFE belongs to Safety.may_stop(), which
+    requires recent evidence that the belt is actually moving. Never call this
+    without going through that gate.
+    """
     return build(0xA2, 0x04, 0x00)
 
 
