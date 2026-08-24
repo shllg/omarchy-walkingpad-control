@@ -56,6 +56,7 @@ class Bridge:
         self.current_speed = 0.0
         self.commanded_speed = 0.0
         self.belt = "unknown"
+        self.mode = "unknown"
         self._last_status_at = 0.0
         self._connected_at = 0.0
         self._stopped_since = time.monotonic()
@@ -98,6 +99,17 @@ class Bridge:
                        "msg": "no recent status; refusing to move the belt"})
             return None
 
+        # Measured 2026-08-24: in standby the pad answers status queries but
+        # ignores every motion command, and the BLE mode-switch opcode is ignored
+        # too -- only the panel's M button leaves standby. Refusing here with a
+        # reason beats writing into the void and looking broken, and it gives the
+        # bar something specific to tell the user to do.
+        if self.mode == "standby":
+            self.emit({"t": "error", "code": "standby",
+                       "msg": "pad is in standby and ignores commands; "
+                              "press M on the panel to switch it to manual"})
+            return None
+
         if cmd == "speed":
             target = self.safety.clamp_speed(self.current_speed, float(obj.get("kmh", 0)))
             self.commanded_speed = target
@@ -122,6 +134,7 @@ class Bridge:
         self._last_status_at = time.monotonic()
         self.current_speed = status.speed_kmh
         self.belt = status.belt
+        self.mode = status.mode
         # "running" is the only state that means the belt is moving; anything
         # else counts as stopped, so an unmapped state fails safe.
         if status.belt == "running":
@@ -131,6 +144,10 @@ class Bridge:
         self.emit({
             "t": "status", "belt": status.belt,
             "speed": status.speed_kmh, "target": self.commanded_speed,
+            # What the pad has stored from the last BLE speed command. Reads 0.0
+            # if the speed was set at the panel, so it is diagnostic only --
+            # "target" above is the number a UI should show.
+            "pad_set_speed": status.set_speed_kmh,
             "mode": status.mode, "time": status.elapsed_s,
             "dist_km": status.distance_km, "steps": status.steps,
         })

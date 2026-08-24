@@ -113,3 +113,21 @@ def test_a_fresh_connection_is_not_immediately_declared_dead():
     b._connected_at = _time.monotonic()
     b._service_link()
     assert t.disconnects == 0
+
+
+def test_motion_is_refused_while_the_pad_is_in_standby():
+    # Measured: in standby the pad answers status queries but silently ignores
+    # every motion command, so sending one would look like a broken plugin.
+    for cmd in ({"cmd": "speed", "kmh": 3.0}, {"cmd": "start"}):
+        b = make_bridge()
+        b.mode = "standby"
+        emitted = []
+        b.emit = emitted.append
+        assert b.handle_command(cmd) is None
+        assert [e["code"] for e in emitted] == ["standby"]
+
+
+def test_stop_is_still_allowed_in_standby():
+    b = make_bridge()
+    b.mode = "standby"
+    assert b.handle_command({"cmd": "stop"}) == frames.stop()
