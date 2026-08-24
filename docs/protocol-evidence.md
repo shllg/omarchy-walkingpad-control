@@ -145,3 +145,60 @@
   it is a DeprecationWarning raised from an imported module, which the default
   filter suppresses. The non-deprecated `GLibUnix.signal_add` needs a much newer
   gobject-introspection, so the compatible call is the right one to ship.
+
+## Full command path measured (2026-08-24, live, operator clear of the belt)
+
+### ✅ Q2 ANSWERED — an explicit START **is** required
+- On a stopped belt in manual mode, `F7 A2 01 <tenths>` alone **does not start it.**
+  Verified twice, ten seconds of polling each time: belt stayed `00`, speed `0.0`.
+  The command is not lost — byte [14] updates — but the belt does not move.
+- `F7 A2 04 01` (START) starts it. Sequence for the QML side is therefore
+  **START first, then set the speed.**
+
+### ⚠⚠ THE PAD STARTS AT ~3.5 km/h REGARDLESS OF THE SET SPEED
+- With byte [14] holding 1.0, then again holding 3.0, START ramped the belt to
+  **3.5 km/h** both times and held there. Reproduced a third time from the panel.
+- → **a naive "start" button puts 3.5 km/h under the user's feet.** This is the
+  single most important safety fact for the widget. The per-command 0.5 clamp does
+  NOT cover it: the clamp governs speed changes, and this is the pad's own start.
+- Ramp up measured ~0.65 km/h/s (0 → 3.5 in ~5 s); ramp down after STOP ~0.5
+  km/h/s. Both faster than the 0.25 km/h/s measured earlier for a small change.
+- There IS a usable window: after START the belt reports `belt=1, speed=0.0` for
+  about two seconds before it accelerates. A speed command lands there.
+
+### Belt states, completed
+      9, 8, 7  = the panel's 3-2-1 startup countdown, ~1 s each  (decoded "unknown" before)
+      1        = running
+      0        = stopped  (CONFIRMED by observation, not just upstream docs)
+      4        = awake and idle, reported while mode == standby
+- Sequence observed: `00 → 09 → 08 → 07 → 01 → (ramp) → 01 → 00` after STOP.
+
+### Byte [14] — the last BLE-commanded speed, NOT a target
+- Echoes speed commands exactly: `0a`→1.0, `0f`→1.5, `1e`→3.0, `14`→2.0. Persists
+  across disconnects. A running belt converges to it when a new command is sent
+  (3.5 → 3.3 → 2.6 → 1.9 → 1.5, then held).
+- ⚠ **It reads 0.0 when the speed was set at the panel** — every frame in the very
+  first capture session shows [14]=00 while the belt ran at 2.5 km/h. And the pad
+  ignores it at start. **Never render it as a target.** This corrects the earlier
+  claim above that the protocol has no target field: it has this, and this is not
+  a reliable one.
+- [16] is not constant either: 0x02 in the first captures, 0x03 once started,
+  0x00 in standby. [15] and [17] stayed 0x00 throughout.
+
+### ⚠ standby ignores everything, and BLE cannot leave it
+- With `mode == standby` (belt 4), the pad answers status queries normally and
+  **silently ignores START, STOP and speed alike.** 40 s of commands, no change.
+- `F7 A2 02 01` (mode → manual) **is also ignored.** BLE cannot leave standby.
+- → only the panel's **M button** switches it to manual. The UI must say so by
+  name rather than appearing broken.
+
+### ⚠ a frozen stale snapshot can survive an abrupt link loss
+- After notifications stopped mid-session, the next connection served eight
+  consecutive byte-identical frames reading `belt=01, speed=3.5` **while the belt
+  was physically stopped.** Counters were frozen with them.
+- The operator confirmed every STOP had in fact worked, so this was a stale
+  readout and NOT a failed stop. An earlier reading of this log said otherwise;
+  it was wrong.
+- → do not build a "did the stop take effect?" watchdog on reported speed. It
+  would fire falsely on exactly this data.
+- → open: how long the stale snapshot persists and what clears it. Seen once.
