@@ -81,6 +81,19 @@ already caused, or nearly caused, a wrong design decision.
     target. A stale frozen status snapshot can also survive an abrupt link loss —
     do not conclude a command failed from reported speed alone.
 
+16. ⚠⚠ **The belt starts BY ITSELF when someone stands on it** — the pad detects
+    load and runs its own countdown, with no command from us. Never infer belt
+    state from "we did not command it"; the status stream is the only truth. A
+    stopped-but-awake pad in manual mode is a live machine.
+
+17. **Never auto-retry a command on a timer.** A retry loop fights the auto-start
+    above and produces an endless countdown-cancel-countdown cycle, which is
+    exactly how that behaviour was discovered. One command per user action.
+
+18. **`stop` is never throttled**, unlike `speed` and `start`. There is no ACK, so
+    a dropped write is invisible and a second press is the user's only recovery.
+    Swallowing it leaves someone on a moving belt; a spammed stop is only noisy.
+
 ## Hard constraints
 
 - **System python only** (`#!/usr/bin/python3`) and **no third-party runtime

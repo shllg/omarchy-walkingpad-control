@@ -43,6 +43,7 @@ IDLE_POLL_INTERVAL_S = 5.0     # after a minute stopped, keep the radio quiet
 IDLE_AFTER_S = 60.0
 RESCAN_BACKOFF_S = 30.0        # the pad SLEEPS; absence is normal, do not storm
 LINK_DEAD_AFTER_S = 15.0       # silence this long means the link is gone, not quiet
+MIN_REPEAT_INTERVAL_S = 1.0    # a repeated command inside this window is dropped
 MAX_CONSECUTIVE_BAD_FRAMES = 10  # spec §8
 
 
@@ -67,6 +68,7 @@ class Bridge:
         self._stopped_since = time.monotonic()
         self._bad_frames = 0
         self._stdin_buffer = b""
+        self._last_command = None
         self._loop = None
         self._running = True
 
@@ -87,17 +89,42 @@ class Bridge:
     def handle_command(self, obj: dict) -> bytes | None:
         cmd = obj.get("cmd")
 
-        # Stop is exempt from every gate. If we are unsure of the state, the
-        # safe action is still to stop, never to refuse.
+        # An unknown command has nothing to refuse, and reporting "refusing to
+        # move the belt" for one would put a wrong error code on the wire for
+        # Stage 2 to misread.
+        if cmd not in ("stop", "speed", "start"):
+            return None
+
+        # ⚠ STOP IS DELIBERATELY EXEMPT FROM THIS.
+        #
+        # Measured 2026-08-24: a script re-sending STOP several times a second
+        # put the pad in a loop of countdown, beep, cancel, countdown. The cause
+        # was the retry loop fighting the pad's own auto-start (see below), not
+        # the pad restarting itself -- so throttling speed and start is enough.
+        #
+        # Stop must never be throttled. There is no ACK in this protocol, so a
+        # lost write is invisible, and a person pressing stop a second time
+        # because nothing happened is the ONLY recovery there is. Swallowing
+        # that retry leaves someone on a moving belt. A spammed stop merely
+        # cancels start attempts; a swallowed one does not stop the belt. The
+        # first failure is far worse than the second.
+        now = time.monotonic()
+        if (cmd != "stop"
+                and self._last_command is not None
+                and self._last_command[0] == cmd
+                and now - self._last_command[1] < MIN_REPEAT_INTERVAL_S):
+            self.emit({"t": "error", "code": "repeat_suppressed",
+                       "msg": "identical '%s' within %.1fs dropped; "
+                              "stop is never throttled"
+                              % (cmd, MIN_REPEAT_INTERVAL_S)})
+            return None
+        self._last_command = (cmd, now)
+
+        # Stop is exempt from every remaining gate. If we are unsure of the
+        # state, the safe action is still to stop, never to refuse.
         if cmd == "stop":
             self.commanded_speed = 0.0
             return frames.stop()
-
-        # Gate only what can move the belt. An unknown command has nothing to
-        # refuse, and reporting "refusing to move the belt" for one would put a
-        # wrong error code on the wire for Stage 2 to misread.
-        if cmd not in ("speed", "start"):
-            return None
 
         if not self.safety.may_move(self._last_status_age()):
             self.emit({"t": "error", "code": "stale_link",

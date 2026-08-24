@@ -1,7 +1,9 @@
 import json
 
 # tests/test_bridge.py
-from walkingpad.bridge import Bridge
+import time
+
+from walkingpad.bridge import Bridge, MIN_REPEAT_INTERVAL_S
 from walkingpad import frames
 
 
@@ -154,3 +156,46 @@ def test_target_is_reported_once_a_speed_is_commanded():
     b._write = emitted.append
     b.on_notify(None, bytes.fromhex("f8a201140100006900000500007a14000300b7fd"))
     assert json.loads(emitted[0])["target"] == 2.5
+
+
+def test_a_repeated_speed_command_is_dropped():
+    b = make_bridge()
+    emitted = []
+    b.emit = emitted.append
+    assert b.handle_command({"cmd": "speed", "kmh": 2.5}) == frames.set_speed(2.5)
+    assert b.handle_command({"cmd": "speed", "kmh": 2.5}) is None
+    assert [e["code"] for e in emitted] == ["repeat_suppressed"]
+
+
+def test_repeated_stops_are_never_throttled():
+    # There is no ACK in this protocol, so a lost write is invisible and a
+    # second press is the only recovery a person has. Swallowing it would leave
+    # someone on a moving belt. Spamming stop only cancels start attempts.
+    b = make_bridge()
+    emitted = []
+    b.emit = emitted.append
+    for _ in range(5):
+        assert b.handle_command({"cmd": "stop"}) == frames.stop()
+    assert emitted == []
+
+
+def test_stop_is_not_throttled_by_a_preceding_speed_command():
+    b = make_bridge()
+    b.emit = lambda o: None
+    b.handle_command({"cmd": "speed", "kmh": 2.5})
+    assert b.handle_command({"cmd": "stop"}) == frames.stop()
+
+
+def test_a_repeat_is_allowed_again_after_the_window():
+    b = make_bridge()
+    b.emit = lambda o: None
+    assert b.handle_command({"cmd": "start"}) == frames.start()
+    b._last_command = ("start", time.monotonic() - MIN_REPEAT_INTERVAL_S - 0.1)
+    assert b.handle_command({"cmd": "start"}) == frames.start()
+
+
+def test_different_commands_are_not_suppressed():
+    b = make_bridge()
+    b.emit = lambda o: None
+    assert b.handle_command({"cmd": "start"}) == frames.start()
+    assert b.handle_command({"cmd": "speed", "kmh": 2.5}) == frames.set_speed(2.5)

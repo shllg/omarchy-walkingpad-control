@@ -202,3 +202,48 @@
 - → do not build a "did the stop take effect?" watchdog on reported speed. It
   would fire falsely on exactly this data.
 - → open: how long the stale snapshot persists and what clears it. Seen once.
+
+## ⚠⚠ THE BELT STARTS BY ITSELF WHEN SOMEONE STANDS ON IT (2026-08-24)
+
+The pad detects a person — belt tension or a load sensor — and starts on its own
+in manual mode, with **no command from us at all**. Observed: belt reporting
+`stopped` at `time=476`, operator standing on it, and four frames later a
+`starting` countdown, then `running` at 1.5 → 1.7 km/h. The operator confirms this
+is the pad's normal behaviour.
+
+This is the explanation for the countdown-loop seen earlier, and it is a plain
+retry-loop bug on our side rather than anything the pad did wrong:
+
+      pad detects load  -> begins 3-2-1 countdown, beeps
+      our script's STOP -> cancels it, double beep
+      pad still detects load -> countdown again
+      ... several times a second, for as long as the loop ran
+
+An earlier note in this log guessed that `F7 A2 04 00` might be a TOGGLE that
+starts a stopped belt. **That guess was wrong.** Stop is a stop; auto-start
+explains every observation without it.
+
+### Consequences, and they are not small
+
+- **The plugin is not the only thing that starts this belt.** Never infer belt
+  state from "we did not command it". The status stream is the only truth.
+- **A stopped-but-awake pad in manual mode is a live machine.** The widget's
+  "stopped" rendering must not imply "safe" or "inert".
+- **Never auto-retry a command in a loop.** Anything that re-sends on a timer will
+  fight the auto-start exactly as above. Send once, per user action, and wait for
+  the status stream to say what happened.
+- **Never throttle STOP**, though — see below. Throttle `speed` and `start` only.
+- It also explains the belt auto-stopping within seconds during earlier probes
+  when nobody was standing on it.
+
+### Why STOP is exempt from repeat-suppression
+- There is no ACK anywhere in this protocol, so a dropped write is invisible.
+- A person pressing stop a second time because nothing happened is the ONLY
+  recovery available to them. Swallowing that retry leaves them on a moving belt.
+- A spammed stop merely cancels start attempts, which is noisy but not dangerous.
+- Worst case of throttling stop is far worse than worst case of not throttling it.
+
+### Still unconfirmed
+- Whether auto-start also happens in `auto` mode (mode 0), never observed.
+- Whether load detection can start the belt from `standby`. Everything else is
+  ignored in standby, so probably not, but it has not been tested.
