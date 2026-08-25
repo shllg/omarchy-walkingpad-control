@@ -53,15 +53,83 @@ Panel {
 
   property int cursorIndex: -1
 
+  // The Set editor is disclosed rather than permanent. A text field living in a
+  // bar popup holds focus away from the panel's key catcher for as long as it
+  // exists, and the buttons already cover the common case.
+  property bool editing: false
+
+  // What the editor will actually DO with what is typed right now. Bound rather
+  // than worked out on apply, so the goal window is visible BEFORE committing
+  // instead of arriving afterwards as a number nobody chose.
+  readonly property real editorTyped: root.editing && speedField.text.trim() !== ""
+    ? Number(speedField.text)
+    : NaN
+
+  readonly property bool editorClamps: root.editing
+    && service !== null && service !== undefined
+    && isFinite(root.editorTyped)
+    && Math.abs(root.editorTyped - service.clampGoal(root.editorTyped)) >= 0.05
+
+  readonly property string editorHint: {
+    if (!service) return ""
+    var window = "Allowed now " + Model.speedText(service.goalLow)
+      + " – " + Model.speedText(service.goalHigh)
+    if (!root.editorClamps) return window
+    return window + " · " + Model.speedText(root.editorTyped)
+      + " applies as " + Model.speedText(service.clampGoal(root.editorTyped))
+  }
+
   readonly property var actions: [
     { key: "start", label: "Start", icon: Model.ICON_START },
     { key: "stop", label: "Stop", icon: Model.ICON_STOP },
     { key: "down", label: "-" + root.speedStep.toFixed(1), icon: Model.ICON_MINUS },
-    { key: "up", label: "+" + root.speedStep.toFixed(1), icon: Model.ICON_PLUS }
+    { key: "up", label: "+" + root.speedStep.toFixed(1), icon: Model.ICON_PLUS },
+    { key: "set", label: "Set", icon: Model.ICON_SET }
   ]
+
+  function openEditor() {
+    if (!service) return
+    root.cursorIndex = -1
+    // Seeded with the target the panel is already showing, so the first thing
+    // you can do is adjust a real number rather than retype one from scratch.
+    var seed = service.targetSpeed !== null && service.targetSpeed !== undefined
+      ? Number(service.targetSpeed)
+      : (root.hasStatus ? root.currentSpeed : 0)
+    speedField.text = Model.speedText(service.clampGoal(seed))
+    root.editing = true
+  }
+
+  function closeEditor() {
+    // Early return so this is a no-op for the IPC methods, which reach invoke()
+    // with the panel shut and have no business moving focus.
+    if (!root.editing) return
+    root.editing = false
+    keyCatcher.forceActiveFocus()
+  }
+
+  function toggleEditor() {
+    if (root.editing) root.closeEditor()
+    else root.openEditor()
+  }
+
+  function applyEditor() {
+    if (!service) { root.closeEditor(); return }
+    // An empty field is a no-op, NOT a zero. Number("") is 0, which would sail
+    // through clampGoal() as the floor and quietly slow the belt to minGoal.
+    if (speedField.text.trim() === "") { root.closeEditor(); return }
+    var value = Number(speedField.text)
+    if (!isFinite(value)) { root.closeEditor(); return }
+    service.setGoal(value)
+    root.closeEditor()
+  }
 
   function invoke(key) {
     if (!service) return
+    if (key === "set") { root.toggleEditor(); return }
+    // Any real command supersedes a half-typed value. start() and stop() both
+    // drop the goal in the service, so an editor left open would be offering a
+    // number that nothing is heading for any more.
+    root.closeEditor()
     // One command per user action (fact 17). Nothing here retries, and nothing
     // here second-guesses a refusal -- the bridge owns both.
     if (key === "start") service.start()
@@ -98,8 +166,16 @@ Panel {
   // there on the next visit reads as a fault the plugin is stuck in.
   onOpenedChanged: {
     cursorIndex = -1
+    // Assigned directly rather than via closeEditor(), which hands focus back
+    // to the key catcher -- not something to do to a panel on its way out.
+    root.editing = false
     if (service) service.clearError()
   }
+
+  // A half-typed goal outlives neither the link nor the pad's attention. The
+  // service drops its goal on any link change (fact 3: absence is the pad's
+  // normal resting state), so the editor must not sit there implying otherwise.
+  onLinkStateChanged: if (root.linkState !== "connected") root.editing = false
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -160,6 +236,11 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // PanelKeyCatcher's documented contract for an inline editor, and the
+      // same thing the wifi passphrase prompt does. Keys.priority is
+      // BeforeItem, so without this the panel swallows Escape, Enter and every
+      // arrow before the text field below ever sees them.
+      blocked: root.editing
       onMoveRequested: function(dx, dy) { root.moveCursor(dx !== 0 ? dx : dy) }
       onActivateRequested: root.activateCursor()
       onCloseRequested: root.close()
@@ -253,45 +334,18 @@ Panel {
               font.letterSpacing: 1.2
               anchors.right: parent.right
             }
-          }
-        }
 
-        // ---------- Speed against the ceiling ----------
-        Item {
-          width: parent.width
-          implicitHeight: Style.space(8)
-          visible: root.hasStatus
-
-          Rectangle {
-            id: speedTrack
-            anchors.fill: parent
-            radius: height / 2
-            color: Qt.rgba(root.bar.foreground.r, root.bar.foreground.g,
-                           root.bar.foreground.b, 0.12)
-          }
-
-          Rectangle {
-            anchors.left: speedTrack.left
-            anchors.verticalCenter: speedTrack.verticalCenter
-            height: speedTrack.height
-            radius: speedTrack.radius
-            color: root.bar.foreground
-            width: Math.max(
-              root.currentSpeed > 0 ? speedTrack.height : 0,
-              speedTrack.width * Math.max(0, Math.min(1, root.maxSpeed > 0
-                ? root.currentSpeed / root.maxSpeed : 0)))
-
-            Behavior on width { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
-            Behavior on color { ColorAnimation { duration: 220 } }
-
-            // Fact 2 again: while the belt is still ramping there is no ACK and
-            // no other signal that the command landed. The pulse is that signal.
-            SequentialAnimation on opacity {
-              running: root.ramping && root.opened
-              loops: Animation.Infinite
-              alwaysRunToEnd: true
-              NumberAnimation { from: 1.0; to: 0.55; duration: 950; easing.type: Easing.InOutSine }
-              NumberAnimation { from: 0.55; to: 1.0; duration: 950; easing.type: Easing.InOutSine }
+            // The pad's ceiling, stated rather than drawn. A filled bar is the
+            // idiom for a TARGET, and spending it on speed-over-maximum made a
+            // fixed limit look like something the belt was heading for.
+            Text {
+              text: "MAX " + Model.speedText(root.maxSpeed)
+              color: root.bar.foreground
+              opacity: 0.45
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              font.letterSpacing: 1.2
+              anchors.right: parent.right
             }
           }
         }
@@ -354,6 +408,89 @@ Panel {
             text: "CONTROL"
             foreground: root.bar.foreground
             fontFamily: root.bar.fontFamily
+          }
+
+          // ---------- Set a speed by hand ----------
+          // The buttons step relative to where the belt already is, which can
+          // never land on a round number from an odd tenth: the pad reports
+          // speed in tenths and hunts around its target, so from 2.8 the only
+          // reachable values are 2.3 and 3.3. This is the way onto an exact one.
+          Column {
+            width: parent.width
+            visible: root.editing
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width
+              implicitHeight: speedField.implicitHeight
+
+              InfoLabel {
+                text: "Set speed"
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                id: unitLabel
+                text: "km/h"
+                color: root.bar.foreground
+                opacity: 0.6
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              TextField {
+                id: speedField
+                width: Style.space(76)
+                anchors.right: unitLabel.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                foreground: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+                horizontalPadding: Style.spacing.controlPaddingX
+                verticalPadding: Style.spacing.controlPaddingY
+                horizontalAlignment: Qt.AlignHCenter
+                inputMethodHints: Qt.ImhFormattedNumbersOnly
+
+                // Deliberately the pad's WHOLE range, not the live goal window.
+                // That window moves as the belt ramps, and a validator that
+                // rejects keystrokes against a moving bound reads as a broken
+                // keyboard. The window is applied on commit instead, and the
+                // caption below says what will happen before you commit.
+                validator: DoubleValidator {
+                  bottom: 0.0
+                  top: root.maxSpeed
+                  decimals: 1
+                  notation: DoubleValidator.StandardNotation
+                }
+
+                onAccepted: root.applyEditor()
+                Keys.onEscapePressed: root.closeEditor()
+
+                // Qt.callLater because focus does not stick while the item is
+                // still becoming visible -- the same guard the wifi prompt uses.
+                onVisibleChanged: if (visible) Qt.callLater(function() {
+                  speedField.forceActiveFocus()
+                  speedField.selectAll()
+                })
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: root.editorHint
+              // Accent, not urgent: a value about to be clamped is the safety
+              // window doing its job, not a fault (spec §5.5).
+              color: root.editorClamps
+                ? Color.accent
+                : Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
           }
 
           Row {

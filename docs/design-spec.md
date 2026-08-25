@@ -313,10 +313,41 @@ width every 30 s while the pad slept.
 | Left click | open the panel | never starts the belt (§6.1) |
 | Right click | **STOP** | panic action, always available, one gesture (§6.2) |
 
-The popup carries a hero (glyph · title · state · actual speed), a speed bar
-against `maxSpeed` that pulses while ramping, an instruction line, the session
-stats, and a `CONTROL` row of Start / Stop / −step / +step with keyboard
+The popup carries a hero (glyph · title · state · actual speed, with the pad's
+ceiling stated beneath as a small `MAX n.n`), an instruction line, the session
+stats, and a `CONTROL` row of Start / Stop / −step / +step / Set with keyboard
 navigation via `PanelKeyCatcher`.
+
+⚠ An earlier revision drew a filled bar of `currentSpeed / maxSpeed` beneath the
+hero. It was removed on 2026-08-25: a filled track is the idiom for progress
+toward a TARGET, and spending it on a fixed ceiling made the pad's limit read as
+something the belt was heading for. The bar also carried the ramp pulse, which
+§2.1(b) makes load-bearing — there is no ACK anywhere, so the pulse was the only
+"your command landed" signal. That signal survives in the `Ramping` state label;
+anything reintroducing a filled bar here should mean an actual goal by it.
+
+**Setting an exact speed is disclosed, not permanent.** The `Set` action reveals
+a `qs.Ui` `TextField` seeded with the current target, and hides it again on
+commit, on Escape, on any other command, when the link drops, and when the panel
+closes. It exists because −step/+step measure from the actual belt speed (§5.2),
+which the pad reports in tenths and hunts around: from 2.8 km/h the only
+reachable values are 2.3 and 3.3, so a round number is unreachable from an odd
+tenth by stepping alone. Stepping stays purely relative; this is the way onto an
+exact value.
+
+Two details are not incidental:
+
+- While the editor is open the `PanelKeyCatcher` above it is `blocked`. That is
+  the component's own documented contract for an inline editor, and the same
+  thing the first-party wifi passphrase prompt does. `Keys.priority` is
+  `BeforeItem`, so without it the panel swallows Escape, Enter and every arrow
+  before the field ever sees them.
+- The field's validator spans the pad's WHOLE range, not the live goal window.
+  That window moves as the belt ramps, and a validator rejecting keystrokes
+  against a moving bound reads as a broken keyboard. The window is applied on
+  commit, and the caption underneath says what will happen first — `5.0 applies
+  as 3.8` — so a clamp is visible before committing rather than arriving
+  afterwards as a number nobody chose.
 
 **Buttons stay pressable and the bridge does the refusing.** The panel never
 re-implements `Safety.may_move` or `may_stop`; it renders `stale_link`,

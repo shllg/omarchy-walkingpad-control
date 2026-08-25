@@ -13,6 +13,7 @@ var ICON_START = String.fromCodePoint(0xF040A)   // nf-md-play
 var ICON_STOP = String.fromCodePoint(0xF04DB)    // nf-md-stop
 var ICON_MINUS = String.fromCodePoint(0xF0376)   // nf-md-minus
 var ICON_PLUS = String.fromCodePoint(0xF0415)    // nf-md-plus
+var ICON_SET = String.fromCodePoint(0xF03EB)     // nf-md-pencil
 
 // Fact 8: "running" is the ONLY state that means the belt is moving, so the
 // running glyph is gated on it directly rather than on the absence of anything.

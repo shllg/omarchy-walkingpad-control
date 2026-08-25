@@ -143,12 +143,28 @@ Item {
     speedDebounce.restart()
   }
 
+  // The window a goal may occupy right now, mirroring Safety.clamp_goal(). It
+  // is published rather than kept inside clampGoal() so the panel can SHOW the
+  // bounds instead of quietly cutting a number someone typed. There is still
+  // exactly one copy of the arithmetic: clampGoal() reads these, and the bridge
+  // clamps again regardless -- these bound what the UI ASKS for, never what the
+  // pad is allowed to receive (spec D-5).
+  // Rounded to a tenth like every other speed here. Binary floating point makes
+  // 2.8 - 1.0 come out as 1.7999999999999998, which is harmless in the clamp
+  // below but reaches the panel as a published number it would have to round
+  // again at every call site.
+  readonly property real goalBase: state.hasStatus ? state.currentSpeed : 0
+  readonly property real goalHigh: Math.round(
+    Math.min(root.maxSpeed, root.goalBase + root.maxGoalLead) * 10) / 10
+  // A belt already slower than minGoal must not be dragged up to it, so the
+  // floor can never cross above the ceiling.
+  readonly property real goalLow: Math.round(
+    Math.min(root.goalHigh,
+             Math.max(root.minGoal, root.goalBase - root.maxGoalLead)) * 10) / 10
+
   function clampGoal(kmh) {
-    var base = state.hasStatus ? state.currentSpeed : 0
-    var high = Math.min(root.maxSpeed, base + root.maxGoalLead)
-    var low = Math.max(root.minGoal, base - root.maxGoalLead)
-    if (low > high) low = high
-    return Math.round(Math.max(low, Math.min(high, Number(kmh))) * 10) / 10
+    var value = Math.max(root.goalLow, Math.min(root.goalHigh, Number(kmh)))
+    return Math.round(value * 10) / 10
   }
 
   function setGoal(kmh) {
