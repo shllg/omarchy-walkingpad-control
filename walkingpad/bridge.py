@@ -222,8 +222,15 @@ class Bridge:
             # it into frames -- one clamped step per status frame. Keeping one
             # writer means a burst of goal updates cannot become a burst of
             # writes, however fast the buttons are pressed.
-            self.goal_speed = self.safety.clamp_goal(
-                self.current_speed, float(obj.get("kmh", 0)))
+            # "absolute" marks a value the user typed and committed, which is
+            # bounded by the pad's range alone. Without it this is the stepping
+            # path, where the lead bound still applies. See clamp_goal_absolute.
+            requested = float(obj.get("kmh", 0))
+            if obj.get("absolute"):
+                self.goal_speed = self.safety.clamp_goal_absolute(requested)
+            else:
+                self.goal_speed = self.safety.clamp_goal(
+                    self.current_speed, requested)
             return None
         return None
 

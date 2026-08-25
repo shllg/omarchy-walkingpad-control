@@ -68,15 +68,19 @@ Panel {
   readonly property bool editorClamps: root.editing
     && service !== null && service !== undefined
     && isFinite(root.editorTyped)
-    && Math.abs(root.editorTyped - service.clampGoal(root.editorTyped)) >= 0.05
+    && Math.abs(root.editorTyped - service.clampGoalAbsolute(root.editorTyped)) >= 0.05
 
   readonly property string editorHint: {
     if (!service) return ""
-    var window = "Allowed now " + Model.speedText(service.goalLow)
-      + " – " + Model.speedText(service.goalHigh)
+    // The PAD's range, not the stepping window. An explicit value is bounded
+    // by what the machine can do and nothing tighter -- the lead bound that
+    // once narrowed this turned a typed 3.5 into 1.0 on a stopped belt, where
+    // the goal is not serviced at all and the bound was protecting nothing.
+    var window = "Allowed " + Model.speedText(service.minGoal)
+      + " – " + Model.speedText(service.maxSpeed)
     if (!root.editorClamps) return window
     return window + " · " + Model.speedText(root.editorTyped)
-      + " applies as " + Model.speedText(service.clampGoal(root.editorTyped))
+      + " applies as " + Model.speedText(service.clampGoalAbsolute(root.editorTyped))
   }
 
   readonly property var actions: [
@@ -95,7 +99,7 @@ Panel {
     var seed = service.targetSpeed !== null && service.targetSpeed !== undefined
       ? Number(service.targetSpeed)
       : (root.hasStatus ? root.currentSpeed : 0)
-    speedField.text = Model.speedText(service.clampGoal(seed))
+    speedField.text = Model.speedText(service.clampGoalAbsolute(seed))
     root.editing = true
   }
 
@@ -119,7 +123,8 @@ Panel {
     if (speedField.text.trim() === "") { root.closeEditor(); return }
     var value = Number(speedField.text)
     if (!isFinite(value)) { root.closeEditor(); return }
-    service.setGoal(value)
+    // setExactGoal, not setGoal: this is the absolute path.
+    service.setExactGoal(value)
     root.closeEditor()
   }
 

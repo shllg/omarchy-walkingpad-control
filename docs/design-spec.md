@@ -120,7 +120,14 @@ codec with no knowledge of Quickshell.
 
 stdin ← one JSON object per line:
 `{"cmd":"speed","kmh":3.0}` · `{"cmd":"start"}` · `{"cmd":"start","kmh":2.0}` ·
-`{"cmd":"stop"}` · `{"cmd":"goal","kmh":3.0}`
+`{"cmd":"stop"}` · `{"cmd":"goal","kmh":3.0}` ·
+`{"cmd":"goal","kmh":3.0,"absolute":true}`
+
+`goal` takes an OPTIONAL `absolute`. Without it the value is bounded against the
+actual belt speed by `max_goal_lead` — the stepping path, driven by −step/+step.
+With it the value is bounded by the pad's range alone, which is what the Set
+editor commits. Both converge identically, one clamped step per status frame;
+see §6 rule 12.
 
 `start` takes an OPTIONAL `kmh`. With it, the bridge runs the two-part start of
 §6 rule 6 — issue `start`, then send that speed once a status frame reports the
@@ -343,11 +350,11 @@ Two details are not incidental:
   `BeforeItem`, so without it the panel swallows Escape, Enter and every arrow
   before the field ever sees them.
 - The field's validator spans the pad's WHOLE range, not the live goal window.
-  That window moves as the belt ramps, and a validator rejecting keystrokes
-  against a moving bound reads as a broken keyboard. The window is applied on
-  commit, and the caption underneath says what will happen first — `5.0 applies
-  as 3.8` — so a clamp is visible before committing rather than arriving
-  afterwards as a number nobody chose.
+  This is also what the editor commits against: an absolute goal is bounded by
+  the pad's range alone, never by the stepping window (§6 rule 12). The caption
+  underneath states that range, and if a typed value would still be cut — only
+  by the ceiling or the floor now — it says so before the commit rather than
+  afterwards: `99.0 applies as 6.0`.
 
 **Buttons stay pressable and the bridge does the refusing.** The panel never
 re-implements `Safety.may_move` or `may_stop`; it renders `stale_link`,
@@ -564,6 +571,25 @@ The pad accepts unauthenticated commands and may have a person standing on it.
     4. It stops on arrival and never repeats a value. A belt that is not moving
        toward the goal -- someone braced against it, a pad ignoring us -- ends
        the convergence rather than being hammered once a second.
+
+    ⚠ Bound 1 governs the STEPPING path only. `{"cmd":"goal","kmh":X,"absolute":
+    true}` -- a value the user typed into the Set editor and committed -- is
+    bounded by the pad's own range and nothing tighter
+    (`Safety.clamp_goal_absolute`). The lead bound is aimed at the repeating
+    path, where each press is worth one increment and nobody has named a
+    destination; an absolute value is one deliberate act that does name one, and
+    cutting it to where the belt currently sits only makes the user type it
+    again. Revised on 2026-08-25 after the bound turned a typed 3.5 into 1.0 on
+    a STOPPED belt -- a state where the goal is not serviced at all, so the
+    bound was protecting nothing and refusing everything.
+
+    Bounds 2, 3 and 4 are what make that safe, and they apply identically to
+    both paths: `max_speed` is still the ceiling, `min_goal` still the floor, and
+    the belt is still walked there one `clamp_speed()` step per status frame. So
+    an absolute goal changes how far ahead the intention may SIT, never how fast
+    the belt may MOVE. `tests/test_goal.py` §5 re-proves the one-step-per-frame
+    property against a distant absolute goal rather than assuming it carries
+    over.
 
     `stop`, `start` and an explicit one-shot `speed` all cancel a goal, and a
     goal never writes in the same frame a start's own speed lands.

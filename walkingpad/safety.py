@@ -98,6 +98,33 @@ class Safety:
         value = min(max(requested, low), high)
         return round(value, 1)
 
+    def clamp_goal_absolute(self, requested: float) -> float:
+        """Bound an EXPLICIT goal to the pad's own range, and nothing tighter.
+
+        Deliberately without clamp_goal()'s max_goal_lead bound. Read that
+        docstring first: the lead bound is aimed squarely at the REPEATING path
+        -- a key that repeats, a double click -- where each press is worth one
+        increment and nobody has stated a destination. An absolute value that a
+        person typed and committed is the opposite of that. It is one
+        deliberate act naming where they want to end up, and refusing it
+        because the belt has not got there yet just makes them type it again.
+
+        What this does NOT relax:
+          - max_speed is still the ceiling.
+          - min_goal is still the floor, so a goal still never reaches 0.0 and
+            normal use never probes whether set-speed-0 stops the belt.
+          - the belt is still walked there one clamp_speed() step per status
+            frame, so it never changes by more than max_step at a time and
+            never moves faster than the pad's own ~0.25 km/h/s ramp.
+
+        So this changes how far ahead the standing intention may SIT, not how
+        fast the belt may move. Requested on 2026-08-25 after the lead bound
+        turned a typed 3.5 into 1.0 on a stopped belt, where the goal is not
+        serviced at all and the bound was protecting nothing.
+        """
+        value = min(max(requested, self.min_goal), self.max_speed)
+        return round(value, 1)
+
     def may_move(self, last_status_age_s: float) -> bool:
         return last_status_age_s <= self.stale_after_s
 

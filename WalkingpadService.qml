@@ -167,9 +167,27 @@ Item {
     return Math.round(value * 10) / 10
   }
 
+  // Bounded by the pad's own range and nothing tighter, mirroring
+  // Safety.clamp_goal_absolute(). The lead bound in clampGoal() above is aimed
+  // at the REPEATING path -- a held +/- key; a value someone typed and
+  // committed is one deliberate act naming a destination, and cutting it to
+  // where the belt happens to be right now only makes them type it again.
+  function clampGoalAbsolute(kmh) {
+    var value = Math.max(root.minGoal, Math.min(root.maxSpeed, Number(kmh)))
+    return Math.round(value * 10) / 10
+  }
+
   function setGoal(kmh) {
     state.pendingSpeed = null
+    state.pendingGoalAbsolute = false
     state.pendingGoal = clampGoal(kmh)
+    goalDebounce.restart()
+  }
+
+  function setExactGoal(kmh) {
+    state.pendingSpeed = null
+    state.pendingGoalAbsolute = true
+    state.pendingGoal = clampGoalAbsolute(kmh)
     goalDebounce.restart()
   }
 
@@ -191,7 +209,8 @@ Item {
     interval: 250
     onTriggered: {
       if (state.pendingGoal === null) return
-      root.send({ cmd: "goal", kmh: state.pendingGoal })
+      root.send({ cmd: "goal", kmh: state.pendingGoal,
+                  absolute: state.pendingGoalAbsolute })
     }
   }
 
@@ -300,6 +319,7 @@ Item {
     property var pendingSpeed: null
     property var goalSpeed: null
     property var pendingGoal: null
+    property bool pendingGoalAbsolute: false
     property real padSetSpeed: 0
     property string mode: "unknown"
     property int elapsedSec: 0
