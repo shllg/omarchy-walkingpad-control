@@ -314,9 +314,10 @@ Open questions:
   must cut it short. Whether a speed change cancels it or rebases it is undecided.
 - **What happens when the link drops mid-taper.** §6.4 refuses motion commands on
   a stale link, so the taper simply stalls, leaving the belt at whatever speed it
-  had reached. Stop is always permitted even on a stale link — but falling back to
-  an abrupt stop is precisely what this feature exists to prevent. Neither branch
-  is obviously right.
+  had reached. Stop is also refused without recent evidence of motion because its
+  opcode is a toggle that can start a stopped belt. The panel and remote remain
+  the safe fallback; whether an abrupt physical stop should replace the taper is
+  still unresolved.
 - **Which counter the goal is measured against.** The pad's counters reset on
   their own, so a goal must be a delta from when it was armed, and a mid-walk
   reset has to be detected rather than read as the goal receding.

@@ -120,9 +120,10 @@ already caused, or nearly caused, a wrong design decision.
   MAC-shaped string in a tracked file. Treat that failure as a stop, not a lint.
 - **Plain constructs only.** No metaprogramming, no clever async beyond the poll loop.
   Comments explain *why* and cite the measured fact they rest on (ADR D-1).
-- **Safety is not optional.** Stop is always permitted, including on a stale link.
-  Everything else is refused without a recent status frame. Speed changes clamp to
-  one step per command — a person may be standing on the belt.
+- **Safety is not optional.** As fact 16 records, stop is gated on recent evidence
+  that the belt is moving; without it, refuse and point the user at the panel.
+  Every motion command requires a recent status frame. Speed changes clamp to one
+  step per command — a person may be standing on the belt.
 - `bluetoothctl` hangs without `--timeout N` and a closed stdin; it still enters its
   REPL otherwise.
 
