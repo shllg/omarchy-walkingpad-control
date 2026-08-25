@@ -5,7 +5,10 @@ app, no account, and no network access. Destined for its own marketplace listing
 
 **Read `docs/design-spec.md` before changing anything.** `docs/protocol-evidence.md`
 records what was measured on real hardware and why. Stage 1 (the bridge) is
-complete — see `docs/plans/2026-08-24-bridge-stage1.md`. Stage 2 is the QML plugin.
+complete — see `docs/plans/2026-08-24-bridge-stage1.md`. Stage 2 is the QML
+plugin: a bar icon plus a popup panel, built on `qs.Ui`'s `Panel` the way every
+first-party popup is. None of the motion controls have run against hardware yet;
+`docs/smoke-test.md` §4b and §4c are the gate before trusting them.
 
 ## Non-obvious facts. Do not re-derive these, and do not "fix" them.
 
@@ -130,8 +133,15 @@ already caused, or nearly caused, a wrong design decision.
 ## Testing
 
 `python -m pytest tests/ -v` runs the whole suite with **no hardware** — the codec
-is tested against real captured frames in `fixtures/`, and the link watchdog
-against a fake transport. `pytest` is a dev-only dependency (`python-pytest`); the
+is tested against real captured frames in `fixtures/`, the link watchdog against
+a fake transport, and the two-part start (the most dangerous logic here) against
+a recording transport in `tests/test_start_sequence.py`. That sequencing lives in
+Python precisely so it can be tested; do not move it into QML, which cannot be.
+
+The QML can also be exercised without hardware. `bin/walkingpad-bridge --replay
+fixtures/c2-fw6.1.2.jsonl` plays captured frames through the transport seam, and
+a `qs -p` harness pointed at a copy of the service will drive the whole stdout
+parse, command channel and debounce with no radio involved. `pytest` is a dev-only dependency (`python-pytest`); the
 bridge itself does not need it.
 
 Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing

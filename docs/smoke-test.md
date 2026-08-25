@@ -78,10 +78,11 @@ command `{"cmd":"speed","kmh":0}` sends exactly `f7 a2 01 00 a3 fd` when the
 last-reported actual speed is either 0.5 km/h or 0.0 km/h. From 0.5 km/h the
 per-action clamp reaches 0.0; from 0.0 km/h it stays at 0.0.
 
-⚠ The bridge repeat-suppresses `speed` and `start` by command name alone, not by
-value; `stop` is explicitly exempt. Two different `speed` requests less than 1.0
-second apart still collide. After every command in both halves, check bridge
-stdout for
+⚠ The bridge repeat-suppresses `speed` and `start` by command name AND requested
+value; `stop` is explicitly exempt. Two *identical* requests less than 1.0 second
+apart collide; two different speeds no longer do. (It keyed on the name alone
+until 2026-08-25, which silently dropped genuine speed changes.) After every
+command in both halves, check bridge stdout for
 `{"t":"error","code":"repeat_suppressed",...}` before recording anything. If
 that line appears, the command was never sent to the pad and says nothing about
 the pad's behaviour. Wait at least 1.0 second, re-send that single command once,
@@ -144,6 +145,74 @@ decision after the evidence is recorded. A Half B result counts only if the
 operator confirms that no `repeat_suppressed` line appeared for the specific
 send whose outcome was recorded. Without that confirmation the run is
 inconclusive and must be repeated, not treated as evidence either way.
+
+## 4b. The two-part start — stand clear of the belt
+
+⚠ This is the first procedure that validates code capable of putting the belt
+under someone. Nobody stands on the pad for any step here.
+
+Added 2026-08-25 with the bridge-side start sequencing (design spec §6 rule 6).
+Fact 12 says the pad ramps to ~3.5 km/h on START regardless of its stored speed,
+so a start that means 2.0 km/h has to send the speed AFTER the belt is moving.
+The unit tests in `tests/test_start_sequence.py` prove the logic; only hardware
+proves the ~2 s window is real and that the pad honours a speed sent inside it.
+
+**Preconditions.** Pad awake, `mode` reads `manual` in the status stream — press
+**M** on the panel if it reads `standby`, because nothing over BLE leaves it
+(fact 13). Phone app closed. Belt clear. Run the bridge by hand, not through the
+shell, so stdout is visible:
+
+```
+./bin/walkingpad-bridge
+```
+
+**Procedure.**
+
+1. Confirm status frames are arriving and `belt` reads `stopped` or `idle`.
+2. Send exactly one start with a speed well below the pad's own:
+   `{"cmd":"start","kmh":2.0}`
+3. Watch the belt state sequence without sending anything else. Expect the 3-2-1
+   countdown (`belt` 9 → 8 → 7, fact 14), then `running`.
+4. Record every status line for the next 20 seconds.
+
+**What to record.**
+
+- Did `speed` settle at **2.0**, or did it settle at ~3.5? Settling at 3.5 means
+  the follow-up speed missed the window or the pad ignored it.
+- How many seconds passed between the first `belt=running` frame and the speed
+  beginning to fall away from the pad's own ramp? That is the real width of the
+  window fact 12 describes; the bridge currently allows `START_SPEED_WINDOW_S`
+  (8 s) for the belt to start at all, which is a different number.
+- Did `{"t":"error","code":"start_unconfirmed",...}` appear? If so the belt never
+  reported `running` within the window and no speed was sent.
+
+**Then stop the belt from the panel, not over BLE**, and record whether the
+status stream follows the transition. Use the BLE stop only in §3, where its
+gating is the thing under test.
+
+⚠ If the belt reaches ~3.5 km/h and stays there, that is the hazard §6 rule 6
+exists to prevent, and it means the sequencing does NOT work on this firmware.
+Record it and stop; do not add a retry, and do not widen the window by guesswork.
+Fact 17 forbids re-sending on a timer, and a retry loop against the toggle is how
+the countdown-cancel-countdown cycle was discovered in the first place.
+
+## 4c. The panel, on hardware
+
+Only after 4b. `omarchy plugin add` this repository, enable it, then confirm each
+of these against the bar icon and popup:
+
+1. Icon alone in the bar, no text. `nf-md-walk` when not running, `nf-md-run`
+   while the belt moves, dimmed while the pad is asleep.
+2. With the pad awake and idle, the popup shows the session stats AND the standby
+   instruction line only when `mode` actually reads `standby` — not permanently.
+   Getting this wrong was the defect that motivated the panel.
+3. Right-click the bar icon with the belt stopped. Expect a refusal naming the
+   panel and the remote, and expect the belt NOT to start (fact 16).
+4. Press −0.5 four times quickly while the belt runs. Expect ONE speed change of
+   one step, not four, and no `repeat_suppressed` for the distinct values.
+5. Kill the bridge process by hand. Expect the widget to recover within a few
+   seconds, and after four kills in a minute to show a hard error rather than
+   respawning forever.
 
 ## 5. Read-only observations for open questions
 
@@ -251,9 +320,10 @@ this session.
 ## Known traps when reading the output
 
 - **`repeat_suppressed` means no frame reached the pad.** The bridge keys this
-  check on command name, not value, so even two different `speed` requests within
-  1.0 second collide. Do not interpret the belt's unchanged state as protocol
-  evidence; wait at least 1.0 second and re-send that single command once.
+  check on command name AND value, so it fires only on a genuinely identical
+  repeat within 1.0 second. Do not interpret the belt's unchanged state as
+  protocol evidence; wait at least 1.0 second and re-send that single command
+  once.
 - **A stale snapshot can survive an abrupt link loss.** Seen once: after
   notifications stopped mid-session, the next connection served eight identical
   frames reading `belt=01, speed=3.5` while the belt was physically stopped. If

@@ -12,6 +12,13 @@ Item {
 
   readonly property string bridgePath: urlToLocalPath(Qt.resolvedUrl("bin/walkingpad-bridge"))
 
+  // Safety limits are the BRIDGE's, not these. These only bound what this
+  // service asks for; every command is clamped again in Python, which is where
+  // the tested policy lives. See docs/design-spec.md D-5.
+  property real maxSpeed: 6.0
+  property real speedStep: 0.5
+  property real startSpeed: 2.0
+
   readonly property string linkState: state.linkState
   readonly property string linkMessage: state.linkMessage
   readonly property bool hasStatus: state.hasStatus
@@ -26,13 +33,98 @@ Item {
   readonly property string lastErrorCode: state.lastErrorCode
   readonly property string lastErrorMessage: state.lastErrorMessage
 
+  // Optimistic target held only while the debounce below is in flight, so a
+  // click is visibly acknowledged before any frame could confirm it.
+  readonly property var pendingSpeed: state.pendingSpeed
+
+  // What a UI should show as the target: the local intent while it is still
+  // settling, otherwise whatever the bridge says it last commanded.
+  readonly property var targetSpeed: state.pendingSpeed !== null
+    ? state.pendingSpeed : state.commandedSpeed
+
+  readonly property bool bridgeAlive: bridgeProc.running
+
+  // Fact 8: only "running" means the belt is moving. Gate on that, never on
+  // the absence of some other value.
+  readonly property bool running: state.beltState === "running"
+
+  // Fact 2: reported speed is ACTUAL and the pad ramps ~0.25 km/h per second,
+  // with no ACK anywhere. Without this a click looks failed for two seconds.
+  readonly property bool ramping: state.hasStatus
+    && root.targetSpeed !== null
+    && Math.abs(state.currentSpeed - Number(root.targetSpeed)) >= 0.05
+
+  // -- commands -------------------------------------------------------------
+
+  function send(obj) {
+    if (!bridgeProc.running) {
+      state.lastErrorCode = "no_bridge"
+      state.lastErrorMessage = "The WalkingPad bridge is not running"
+      return false
+    }
+    // A new action supersedes the last refusal, so a stale message never sits
+    // under a button the user has since pressed again.
+    state.lastErrorCode = ""
+    state.lastErrorMessage = ""
+    bridgeProc.write(JSON.stringify(obj) + "\n")
+    return true
+  }
+
+  // Fact 12: the pad ramps to ~3.5 km/h on START whatever speed it has stored.
+  // The bridge owns the two-part sequence; passing kmh is what arms it.
+  function start() {
+    state.pendingSpeed = null
+    speedDebounce.stop()
+    send({ cmd: "start", kmh: root.startSpeed })
+  }
+
+  // Fact 16: the stop opcode is a TOGGLE. The bridge refuses it without recent
+  // evidence of motion, and says so; this never second-guesses that here.
+  // Fact 18: stop is never throttled, so it is never debounced either.
+  function stop() {
+    state.pendingSpeed = null
+    speedDebounce.stop()
+    send({ cmd: "stop" })
+  }
+
+  function setSpeed(kmh) {
+    var value = Math.max(0, Math.min(root.maxSpeed, Number(kmh)))
+    state.pendingSpeed = Math.round(value * 10) / 10
+    // Spec §5.2: rapid clicks must not become rapid writes. One command goes
+    // out for the settled value, never one per click.
+    speedDebounce.restart()
+  }
+
+  // Step from the ACTUAL speed, not from the pending value: the pad clamps each
+  // command to one step from where the belt really is, so accumulating clicks
+  // locally would display a target the belt was never going to reach.
+  function speedBy(delta) {
+    var base = state.hasStatus ? state.currentSpeed : 0
+    setSpeed(base + delta)
+  }
+
+  function speedUp() { speedBy(root.speedStep) }
+  function speedDown() { speedBy(-root.speedStep) }
+
+  Timer {
+    id: speedDebounce
+    interval: 250
+    onTriggered: {
+      if (state.pendingSpeed === null) return
+      root.send({ cmd: "speed", kmh: state.pendingSpeed })
+      // Cleared once sent; from here the bridge's own target is the truth.
+      state.pendingSpeed = null
+    }
+  }
+
+  // -- bridge output --------------------------------------------------------
+
   function handleStatus(event) {
     // A status frame is the bridge's proof of a working link; BlueZ connection
-    // state alone is not sufficient on this pad.
+    // state alone is not sufficient on this pad (fact 9).
     state.linkState = "connected"
     state.linkMessage = ""
     state.hasStatus = true
-    state.beltState = String(event.belt)
     state.currentSpeed = Number(event.speed)
     state.commandedSpeed = event.target === null ? null : Number(event.target)
     state.padSetSpeed = Number(event.pad_set_speed)
@@ -40,8 +132,15 @@ Item {
     state.elapsedSec = Number(event.time)
     state.distanceKm = Number(event.dist_km)
     state.steps = Number(event.steps)
-    state.lastErrorCode = ""
-    state.lastErrorMessage = ""
+    // Assigned LAST, deliberately. beltState is the property consumers watch to
+    // decide the belt is moving, and every other field in this frame has to be
+    // in place before that signal goes out -- otherwise a handler reads the new
+    // belt state beside the PREVIOUS frame's speed and mode.
+    state.beltState = String(event.belt)
+    // NOTE: the last error is deliberately NOT cleared here. Status arrives at
+    // 1 Hz, so clearing it per frame flashed every refusal for under a second
+    // and made stop look like it had simply done nothing. A refusal stays up
+    // until the user's next action clears it in send().
   }
 
   function handleLink(event) {
@@ -56,13 +155,22 @@ Item {
     state.linkState = nextState
     state.linkMessage = String(event.msg || "")
     state.hasStatus = false
+    state.pendingSpeed = null
     state.lastErrorCode = ""
     state.lastErrorMessage = ""
   }
 
   function handleError(event) {
-    state.lastErrorCode = String(event.code || "")
+    // Message before code. Each property signals its own change, so anything
+    // watching onLastErrorCodeChanged reads whatever the OTHER property holds
+    // at that instant -- and with the code assigned first that was the previous
+    // message, or an empty one. Assigning the trigger last makes the pair
+    // coherent for imperative readers; bindings settle either way.
     state.lastErrorMessage = String(event.msg || "")
+    state.lastErrorCode = String(event.code || "")
+    // The bridge gave up on a start it had armed, so drop the optimistic
+    // target with it rather than showing a speed nothing is heading for.
+    if (state.lastErrorCode === "start_unconfirmed") state.pendingSpeed = null
   }
 
   function handleLine(line) {
@@ -91,6 +199,7 @@ Item {
     property string beltState: "unknown"
     property real currentSpeed: 0
     property var commandedSpeed: null
+    property var pendingSpeed: null
     property real padSetSpeed: 0
     property string mode: "unknown"
     property int elapsedSec: 0
@@ -98,6 +207,7 @@ Item {
     property int steps: 0
     property string lastErrorCode: ""
     property string lastErrorMessage: ""
+    property int respawns: 0
   }
 
   Process {
@@ -105,18 +215,56 @@ Item {
     command: [root.bridgePath]
     running: true
 
-    // The bridge treats stdin EOF as its parent exiting, even in this
-    // read-only slice where the service never writes a command.
+    // The bridge writes commands and reads status over this pipe, and treats
+    // EOF as its parent exiting.
     stdinEnabled: true
+
+    // The bridge must not write __pycache__ into the installed plugin, or the
+    // shell's own inotify watch reloads every plugin. That is enforced in
+    // bin/walkingpad-bridge with sys.dont_write_bytecode, not with an
+    // environment variable here: Process.environment is a QVariantHash and a
+    // QML object literal binds to it as a QVariantMap, which qmllint rejects.
 
     stdout: SplitParser {
       onRead: function(line) { root.handleLine(line) }
     }
 
     onExited: function(exitCode, exitStatus) {
-      state.linkState = "error"
-      state.linkMessage = "The bridge exited with code " + exitCode
       state.hasStatus = false
+      state.pendingSpeed = null
+      // A new process has no memory of what the old one commanded.
+      state.commandedSpeed = null
+
+      // Bounded respawn. This is NOT the auto-retry fact 17 forbids: that rule
+      // is about re-sending COMMANDS to the pad, and a fresh bridge sends none
+      // -- it scans. Any half-finished start died with the old process. The
+      // cap exists so a bridge that cannot run fails visibly instead of
+      // respawning forever.
+      if (state.respawns < 3) {
+        state.respawns++
+        state.linkState = "scanning"
+        state.linkMessage = "Restarting the bridge"
+        respawnWindow.restart()
+        respawnDelay.restart()
+        return
+      }
+
+      state.linkState = "error"
+      state.linkMessage = "The bridge keeps exiting (last code " + exitCode + ")"
     }
+  }
+
+  // Successive failures only count as a run when they are close together, so a
+  // bridge that dies once a day still gets restarted.
+  Timer {
+    id: respawnWindow
+    interval: 60000
+    onTriggered: state.respawns = 0
+  }
+
+  Timer {
+    id: respawnDelay
+    interval: 1000
+    onTriggered: bridgeProc.running = true
   }
 }

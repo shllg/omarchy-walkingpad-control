@@ -71,9 +71,10 @@ Three components, one process tree, no systemd unit, no root, no compiled binary
 ```
   ┌─ Quickshell (the shell process) ───────────────────────────┐
   │                                                             │
-  │  WalkingpadWidget.qml   × N monitors   (pure view, no state)│
-  │            │ reads                                          │
-  │  WalkingpadService.qml  service (one per plugin id) ◄─ IpcHandler ◄─┼─ qs ipc call
+  │  WalkingpadPanel.qml    × N monitors   (pure view, no state)│
+  │        bar icon + popup  ◄─ IpcHandler ◄──────────────┼─ qs ipc call
+  │            │ reads / writes commands                        │
+  │  WalkingpadService.qml  service (one per plugin id)         │
   │            │ owns exactly one                               │
   │         Process ──stdio, JSON lines──┐                      │
   └──────────────────────────────────────┼──────────────────────┘
@@ -118,7 +119,13 @@ codec with no knowledge of Quickshell.
 ### 4.1 Interface
 
 stdin ← one JSON object per line:
-`{"cmd":"speed","kmh":3.0}` · `{"cmd":"start"}` · `{"cmd":"stop"}`
+`{"cmd":"speed","kmh":3.0}` · `{"cmd":"start"}` · `{"cmd":"start","kmh":2.0}` ·
+`{"cmd":"stop"}`
+
+`start` takes an OPTIONAL `kmh`. With it, the bridge runs the two-part start of
+§6 rule 6 — issue `start`, then send that speed once a status frame reports the
+belt running. Without it, a bare `start` sends nothing further and the pad goes
+to its own ~3.5 km/h.
 
 That is the complete implemented command vocabulary. Any other `cmd` value is
 silently ignored, including `mode`, `connect` and `disconnect`. This is not an
@@ -153,6 +160,7 @@ stdout → one JSON object per line:
  "mode":"manual","time":1014,"dist_km":0.70,"steps":1321}
 {"t":"link","state":"connected","addr":"<pad-addr>","name":"KS-BLC2"}
 {"t":"error","code":"no_link","msg":"not connected to the pad"}
+{"t":"error","code":"start_unconfirmed","msg":"the belt did not start within 8s; no speed was sent"}
 ```
 
 `pad_set_speed` is what the pad has stored from the last BLE speed command; it
@@ -217,37 +225,110 @@ limits.
 
 ```
 readonly property string  linkState      // scanning | connected | absent | unavailable | lost | error
-readonly property string  beltState      // stopped | running | unknown
+readonly property string  beltState      // stopped | starting | running | idle | unknown
 readonly property real    currentSpeed   // from frames — ACTUAL
-readonly property real    commandedSpeed // what we last asked for
-readonly property bool    ramping        // currentSpeed !== commandedSpeed
+readonly property var     commandedSpeed // what the BRIDGE last commanded; null until something is
+readonly property var     pendingSpeed   // local intent, only while §5.2's debounce is in flight
+readonly property var     targetSpeed    // pendingSpeed, else commandedSpeed — what a UI shows
+readonly property bool    ramping        // currentSpeed has not reached targetSpeed
+readonly property bool    running        // beltState === "running", and nothing else (fact 8)
 readonly property int     steps
 readonly property real    distanceKm
 readonly property int     elapsedSec
 ```
 
-Plus an `IpcHandler` (target `walkingpad`) exposing `speedUp`, `speedDown`,
-`stop`, `start`, `toggle`, `status` — so Hyprland keybinds are one-liners
-(`qs ipc call walkingpad speedUp`) with no extra binary.
+`commandedSpeed` is nullable on purpose: the bridge routinely adopts a belt it
+did not start, and reporting 0.0 there reads as a commanded stop.
+
+The service also owns the command channel — `start()`, `stop()`, `setSpeed()`,
+`speedUp()`, `speedDown()` — writing one JSON line per action to the bridge's
+stdin. It re-clamps nothing: every command is gated again in Python, which is the
+copy with tests. `send()` clears the last error, so a refusal stays on screen
+until the user's next action rather than being wiped by the next status frame
+1 s later.
+
+**Assignment order in `handleStatus` is load-bearing.** Each property signals its
+own change, so a handler watching one reads whatever the others hold at that
+instant. `beltState` is assigned LAST because it is the property consumers watch
+to decide the belt is moving; `lastErrorMessage` is assigned before
+`lastErrorCode` for the same reason. Verified under Quickshell: before this,
+`onBeltStateChanged` observed `belt=running` beside the previous frame's
+`speed=0, mode=unknown`.
+
+**Bridge respawn.** `onExited` restarts the bridge up to 3 times a minute, then
+holds a hard error state. This is not rule 11's forbidden retry — a fresh bridge
+sends no motion command, it scans, and any half-finished start died with the old
+process. The cap is so a bridge that cannot run fails visibly.
+
+The `IpcHandler` (target `walkingpad`) lives in the panel rather than here,
+because `qs.Ui`'s `Panel` base already claims that target for `open`/`close`/
+`toggle` and only one handler per target is permitted. See §5.3.
 
 ### 5.2 Input coalescing — required, not an optimisation
 
 Because of §2.1(b), rapid clicks must not become rapid writes.
 
-- Clicks mutate `commandedSpeed` immediately and locally.
+- Clicks mutate `pendingSpeed` immediately and locally.
 - A 250 ms debounce timer sends **one** speed command for the settled value.
-- While `ramping`, the bar renders `2.0→2.5` so the input is visibly acknowledged
-  even though the pad has not reached the target.
+- While `ramping`, the panel labels the target "Heading for" so the input is
+  visibly acknowledged even though the pad has not reached it.
+- Each step is measured from the **actual** belt speed, not from the accumulated
+  local value. The pad clamps every command to one step from where the belt
+  really is, so accumulating clicks locally would display a target the belt was
+  never going to reach.
 
-### 5.3 `WalkingpadWidget.qml` (bar-widget entry point)
+⚠ The bridge's repeat-suppression signature includes the requested speed, not
+just the command name. It keyed on the name alone until 2026-08-25, which made
+two DIFFERENT speeds inside the 1 s window collide, with the second dropped in
+silence — indistinguishable, from the bar, from a speed the pad ignored. That is
+exactly the reading that would talk someone into weakening a safety gate.
+Allowing distinct values through adds no hazard, because each is still clamped to
+one step from the actual speed, which moves only ~0.25 km/h per second: a burst
+of clicks still resolves to the same number and still collapses to one write.
 
-Stateless view. Renders glyph + speed, or step count when stopped.
+### 5.3 `WalkingpadPanel.qml` (bar-widget entry point)
+
+Stateless view. Built on `qs.Ui`'s `Panel`, which is the shape every first-party
+popup uses: ONE bar-widget entry point whose root owns both the bar button and
+the popup. `omarchy.power`, `omarchy.bluetooth` and `omarchy.audio` are all
+`kinds: ["bar-widget"]` with `entryPoints.barWidget` pointing at a `Panel`; there
+is no separate "panel" kind for this. `manageIpc: false`, so the panel owns the
+single `IpcHandler` on target `walkingpad`, exposing `open`/`close`/`toggle` plus
+`start`, `stop`, `speedUp`, `speedDown`, `status` — Hyprland keybinds are then
+one-liners (`qs ipc call walkingpad speedUp`) with no extra binary.
+
+**The bar shows one icon and no text.** A `BarIconButton` at `Style.bar.iconSlot`,
+its glyph carrying the state: `nf-md-run` (U+F070E) while the belt is running,
+`nf-md-walk` (U+F0583) otherwise, dimmed whenever the link is not connected. Fact
+3 makes dimming the right register for a sleeping pad — that is its normal
+resting state, not a fault, so it never takes the urgent role. Glyphs are written
+as `String.fromCodePoint`, because these all sit in the Supplementary Private Use
+Area where a stray re-encoding truncates them into a different, valid-looking
+character. An earlier revision rendered a full status sentence in the bar; at
+`Style.font.body` that measured ~512 px with no cap and no elide, and it changed
+width every 30 s while the pad slept.
 
 | Interaction | Action | Rationale |
 |---|---|---|
-| Left click | open the plugin menu | never starts the belt (§6) |
-| Right click | **STOP** | panic action, always available, one gesture |
-| Scroll | ±0.1 km/h, debounced | fine control without a menu |
+| Left click | open the panel | never starts the belt (§6.1) |
+| Right click | **STOP** | panic action, always available, one gesture (§6.2) |
+
+The popup carries a hero (glyph · title · state · actual speed), a speed bar
+against `maxSpeed` that pulses while ramping, an instruction line, the session
+stats, and a `CONTROL` row of Start / Stop / −step / +step with keyboard
+navigation via `PanelKeyCatcher`.
+
+**Buttons stay pressable and the bridge does the refusing.** The panel never
+re-implements `Safety.may_move` or `may_stop`; it renders `stale_link`,
+`standby`, `stop_unsafe` and `no_link` verbatim. One authority for safety, and no
+second copy in untestable QML to drift from it.
+
+**The instruction line is separate from the state label, not a replacement for
+it.** The pad reports `belt=idle` and `mode=standby` in the SAME frame — the
+captured `f8a204000200…` shows both, and `frames.py` records that belt 4 is what
+an awake pad reports with nobody on it. An earlier widget tested `mode` before
+`beltState` and so displayed "In standby — press M on the panel" for essentially
+the whole time the pad was reachable, hiding every statistic behind it.
 
 ### 5.4 Discovery and adoption
 
@@ -431,11 +512,32 @@ The pad accepts unauthenticated commands and may have a person standing on it.
    per-action clamp governs *changes*; this is the pad's own start behaviour and
    sits outside it.
 
-   Therefore starting is a two-part action, and the service owns both parts: issue
-   `start`, then issue the intended speed as soon as `belt` becomes `running`.
-   There is a ~2 s window at `belt=running, speed=0.0` before the pad accelerates,
-   which is where the speed command must land. A UI that offers a bare "start" and
-   trusts the displayed speed setting is putting 3.5 km/h under someone's feet.
+   Therefore starting is a two-part action, and **the bridge** owns both parts:
+   `{"cmd":"start","kmh":X}` issues `start`, arms `X`, and sends it from
+   `on_notify` as soon as a status frame reports `belt=running`. There is a ~2 s
+   window at `belt=running, speed=0.0` before the pad accelerates, which is where
+   the speed command must land. A UI that offers a bare "start" and trusts the
+   displayed speed setting is putting 3.5 km/h under someone's feet.
+
+   ⚠ Earlier revisions of this section put the sequencing in the QML service.
+   That was moved on 2026-08-25: QML cannot be unit-tested here, and this is the
+   most dangerous logic in the project. In Python it sits beside `Safety` and is
+   covered by `tests/test_start_sequence.py`. Three properties matter, and each
+   has a test:
+
+   - The follow-up speed is capped at `Safety.pad_start_speed` (3.5), never run
+     through `clamp_speed()`. The step clamp measures a change against the
+     CURRENT speed, which is 0.0 here, so it would clamp every start to 0.5. The
+     cap makes the safety property provable instead of argued: a start can be
+     slowed down and has no way to be sped up.
+   - It is armed only when the belt is not already running, fires at most once,
+     and is cancelled by `stop` or by any explicit `speed`.
+   - It expires after `START_SPEED_WINDOW_S`. Without expiry a start that never
+     took would fire whenever the belt next moved — possibly much later, when
+     someone started it by hand at the panel.
+
+   This is not the timer retry rule 11 forbids: nothing is re-sent, and the
+   trigger is an observed state change rather than a clock.
 7. **A stopped belt cannot be started by setting a speed** — the command is stored
    and ignored. Only `start` starts it (open question 2, now answered).
 8. ⚠⚠ **The stop opcode is a TOGGLE — it starts a stopped belt.** Confirmed
