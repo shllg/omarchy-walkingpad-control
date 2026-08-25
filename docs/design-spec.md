@@ -502,7 +502,7 @@ least-used language. Mitigation is explicit and binding on the implementation:
 `/usr/bin/python3`, with no third-party package at all (see ADR D-3 for how the
 dependency was removed entirely).
 
-Ruby, Node and Bun on this machine are all mise-managed. The os-configs CLAUDE.md
+Ruby, Node and Bun on this machine are all mise-managed. The os-configs AGENTS.md
 documents a real, recurring failure in which concurrent `mise use -g` wipes the
 global config and unmounts every binary under a version pin. A bar widget must not
 inherit that failure mode. The bridge shebang is `#!/usr/bin/python3` and the

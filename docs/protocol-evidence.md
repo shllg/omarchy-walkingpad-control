@@ -222,7 +222,7 @@ connecting as the trigger. One frame, immediate countdown.
 
 ### This inverted the safety model
 The rule "stop is always permitted, including on a stale link" was written into
-the spec, CLAUDE.md and the tests. It was the single most dangerous line in the
+the spec, AGENTS.md and the tests. It was the single most dangerous line in the
 design: **without a recent frame we do not know which way the toggle goes, and
 half the outcomes start a treadmill.** `Safety.may_stop()` now requires recent
 evidence that the belt is actually moving, and refuses otherwise, telling the

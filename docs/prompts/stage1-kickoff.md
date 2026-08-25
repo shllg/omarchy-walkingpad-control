@@ -1,15 +1,14 @@
 # Stage 1 kickoff prompt
 
-Paste into a fresh Claude Code session started in `~/src/omarchy-walkingpad`.
+Use this as the Stage 1 kickoff from the repository root.
 
 ---
 
-Read `CLAUDE.md`, `docs/design-spec.md`, and `docs/plans/2026-08-24-bridge-stage1.md`
+Read `AGENTS.md`, `docs/design-spec.md`, and `docs/plans/2026-08-24-bridge-stage1.md`
 before doing anything.
 
 Implement Stage 1: the Python `walkingpad-bridge`. Work through the plan's five tasks
-in order using the `superpowers:executing-plans` skill, checkpointing with me between
-tasks.
+in order, pausing for review between tasks.
 
 The plan is complete and self-reviewed — every step contains the actual code, not a
 description of it. Follow it as written. If you believe a step is wrong, stop and say
