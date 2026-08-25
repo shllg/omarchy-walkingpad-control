@@ -43,8 +43,10 @@ paths = sorted(Path(name.decode()) for name in tracked.split(b"\0") if name)
 
 RUNTIME = set(sys.stdlib_module_names) | {"gi", "walkingpad"}
 # pytest is a dev-only dependency (python-pytest) and never enters the bridge's
-# import path, so tests may use it and nothing else may.
-TESTS = RUNTIME | {"pytest"}
+# import path, so tests may use it and nothing else may. "tests" is this
+# repository's own package, not a dependency: one test file importing a fixture
+# or fake transport from a sibling installs nothing and cannot reach a user.
+TESTS = RUNTIME | {"pytest", "tests"}
 
 
 def is_python(path):
