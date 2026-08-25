@@ -21,15 +21,27 @@ acceptable. Stopping is exempt -- see bridge.py.
 # has stored, and ignores a speed command sent while it is stopped.
 PAD_START_SPEED_KMH = 3.5
 
+# A goal is never allowed to reach 0.0. Whether a set-speed of zero stops the
+# belt is an OPEN hardware question (docs/smoke-test.md §4) and the stop opcode
+# is a toggle, so normal use must not wander into probing it by accident.
+MIN_GOAL_KMH = 0.5
+
+# How far a goal may sit from the ACTUAL belt speed. See clamp_goal().
+MAX_GOAL_LEAD_KMH = 1.0
+
 
 class Safety:
     def __init__(self, max_speed: float = 6.0, max_step: float = 0.5,
                  stale_after_s: float = 3.0,
-                 pad_start_speed: float = PAD_START_SPEED_KMH):
+                 pad_start_speed: float = PAD_START_SPEED_KMH,
+                 max_goal_lead: float = MAX_GOAL_LEAD_KMH,
+                 min_goal: float = MIN_GOAL_KMH):
         self.max_speed = max_speed
         self.max_step = max_step
         self.stale_after_s = stale_after_s
         self.pad_start_speed = pad_start_speed
+        self.max_goal_lead = max_goal_lead
+        self.min_goal = min_goal
 
     def clamp_speed(self, current: float, requested: float) -> float:
         low = current - self.max_step
@@ -57,6 +69,34 @@ class Safety:
         """
         value = min(requested, self.pad_start_speed, self.max_speed)
         return round(max(value, 0.0), 1)
+
+    def clamp_goal(self, current: float, requested: float) -> float:
+        """Bound a live goal against the ACTUAL belt speed.
+
+        A goal is not a command. It is a standing intention the bridge walks the
+        belt toward, one clamp_speed() step per status frame, so the belt still
+        never changes by more than max_step at a time and max_speed is still the
+        ceiling. What this adds is a bound on how far ahead of reality the
+        intention may run.
+
+        That bound is the point. The per-action clamp was written for "the worst
+        case of a stuck key or a double click is one small increment", and a goal
+        with no lead limit gives that back: a key that repeats walks the goal to
+        the ceiling and the belt follows it there. Capping the lead means the
+        worst an unattended input can do at any instant is max_goal_lead, and it
+        cannot compound until the belt has actually caught up -- which takes real
+        seconds at ~0.25 km/h/s, in front of someone who can see it happening.
+
+        Symmetric on purpose. Slowing down is the safer direction, but a goal
+        that can drop arbitrarily far still asks for a deceleration nobody
+        braced for, and symmetry is easier to predict than a special case.
+        """
+        low = max(self.min_goal, current - self.max_goal_lead)
+        high = min(self.max_speed, current + self.max_goal_lead)
+        # A belt already slower than min_goal must not be dragged up to it.
+        low = min(low, high)
+        value = min(max(requested, low), high)
+        return round(value, 1)
 
     def may_move(self, last_status_age_s: float) -> bool:
         return last_status_age_s <= self.stale_after_s

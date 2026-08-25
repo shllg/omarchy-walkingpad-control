@@ -120,7 +120,7 @@ codec with no knowledge of Quickshell.
 
 stdin ← one JSON object per line:
 `{"cmd":"speed","kmh":3.0}` · `{"cmd":"start"}` · `{"cmd":"start","kmh":2.0}` ·
-`{"cmd":"stop"}`
+`{"cmd":"stop"}` · `{"cmd":"goal","kmh":3.0}`
 
 `start` takes an OPTIONAL `kmh`. With it, the bridge runs the two-part start of
 §6 rule 6 — issue `start`, then send that speed once a status frame reports the
@@ -502,6 +502,47 @@ The pad accepts unauthenticated commands and may have a person standing on it.
 2. **Right click always means stop**, at every level of the UI.
 3. **Per-action speed delta is clamped** (default 0.5 km/h, configurable). One
    gesture cannot take a walker from 2.5 to 6.0 km/h.
+
+   ⚠ Revised 2026-08-25, after hardware use. Clamping each press against the
+   ACTUAL belt speed made the buttons dead for ~2 s per step: the belt ramps at
+   ~0.25 km/h/s, so a second press inside that window resolved to the same
+   number and was dropped as a repeat. The fix is a **live goal** (rule 12), not
+   a bigger per-command clamp. Every write is still one `max_step` step; what
+   changed is that the *intention* may now sit ahead of the belt.
+
+12. **The live goal, and the four bounds it rests on.** `{"cmd":"goal","kmh":X}`
+    sets a standing intention. `Bridge._service_goal()` walks the belt toward it,
+    at most one write per status frame, and is **the first autonomous writer in
+    this design** -- every other write here follows a press. §5.8 requires that
+    to be justified rather than assumed, so:
+
+    1. `Safety.clamp_goal()` bounds the goal to `max_goal_lead` (1.0 km/h) either
+       side of the ACTUAL speed. This is what replaces "one gesture, one step".
+       The original rationale was *"the worst case of a stuck key or a double
+       click is one small increment"*; an uncapped goal hands that back, because
+       a repeating key walks the goal to the ceiling and the belt follows it
+       there. With the cap, a key that repeats forever still cannot move the goal
+       more than 1.0 km/h ahead of reality, and cannot compound until the belt
+       has caught up -- which takes real seconds, in front of someone who can see
+       it happening.
+    2. Every write is still `clamp_speed()`, one `max_step` step. Loosening the
+       lead does not loosen this; `tests/test_goal.py` asserts it by widening
+       `max_goal_lead` and checking the write is still one step.
+    3. Nothing is written unless a fresh frame says `belt == running`, the mode
+       is not standby, and `may_move()` passes.
+    4. It stops on arrival and never repeats a value. A belt that is not moving
+       toward the goal -- someone braced against it, a pad ignoring us -- ends
+       the convergence rather than being hammered once a second.
+
+    `stop`, `start` and an explicit one-shot `speed` all cancel a goal, and a
+    goal never writes in the same frame a start's own speed lands.
+
+    A goal is floored at `min_goal` (0.5 km/h) and never reaches 0.0: whether a
+    set-speed of zero stops the belt is an OPEN hardware question
+    (`docs/smoke-test.md` §4), and the stop opcode is a toggle, so normal use
+    must not wander into probing it by accident.
+
+    ⚠ Still unproven on hardware. `docs/smoke-test.md` §4d is the gate.
 4. **No blind writes.** If no status frame has arrived within 3 s, the service
    refuses to issue motion commands and shows a stale-link state. ⚠ **This now
    includes stop** — see rule 10.

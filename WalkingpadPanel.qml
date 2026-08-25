@@ -38,15 +38,18 @@ Panel {
     ? Model.instruction(linkState, mode, service.lastErrorCode, service.lastErrorMessage)
     : "The WalkingPad service is not loaded."
 
-  // A refusal is the one thing here that earns the urgent role. Everything
-  // else -- asleep, standby, in use elsewhere -- is a normal state or an
-  // instruction, and stays on the ordinary foreground (spec §5.5).
   // Written as an explicit comparison rather than `service && ...`: a missing
   // service makes that expression undefined, and QML warns on assigning
   // undefined to a bool.
   readonly property bool refusing: service !== null && service !== undefined
     && service.lastErrorCode !== ""
     && service.lastErrorCode !== "standby"
+
+  // Three registers, all from theme roles. An expected refusal the user can act
+  // on gets `accent` -- attention, not failure. Only a plugin that is genuinely
+  // not working gets `urgent`.
+  readonly property bool refusalIsFault: root.refusing
+    && !Model.isAdvisory(service.lastErrorCode)
 
   property int cursorIndex: -1
 
@@ -90,7 +93,13 @@ Panel {
 
   onServiceChanged: applySettings()
   onSettingsChanged: applySettings()
-  onOpenedChanged: if (opened) cursorIndex = -1
+  // Opening or closing the panel dismisses the last refusal. It described the
+  // press that provoked it, not a standing condition, and finding it still
+  // there on the next visit reads as a fault the plugin is stuck in.
+  onOpenedChanged: {
+    cursorIndex = -1
+    if (service) service.clearError()
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -296,7 +305,9 @@ Panel {
           width: parent.width
           visible: root.instruction !== ""
           text: root.instruction
-          color: root.refusing ? Color.urgent : Qt.darker(root.bar.foreground, 1.2)
+          color: root.refusalIsFault
+            ? Color.urgent
+            : (root.refusing ? Color.accent : Qt.darker(root.bar.foreground, 1.2))
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -320,7 +331,11 @@ Panel {
             spacing: Style.spacing.labelGap
             InfoPair { label: "Time"; value: root.service ? Model.elapsedText(root.service.elapsedSec) : "" }
             InfoPair {
-              label: root.ramping ? "Heading for" : "Commanded"
+              // A live goal is what the person asked for; "Commanded" is only
+              // the intermediate step, and naming it that when a goal is set
+              // would show a number nobody chose.
+              label: root.service && root.service.goalSpeed !== null
+                ? "Goal" : (root.ramping ? "Heading for" : "Commanded")
               value: root.service ? Model.targetText(root.service.targetSpeed) : "—"
             }
           }

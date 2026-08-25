@@ -70,6 +70,27 @@ function instruction(linkState, mode, errorCode, errorMessage) {
   return ""
 }
 
+// A refusal is not a fault. Most of what the bridge says "no" to is expected
+// and the user can act on it: the belt is not known to be moving, the link went
+// quiet for a moment, the pad is in standby. Painting those in the urgent role
+// says something is broken when nothing is -- reported from hardware
+// 2026-08-25, where a stop refused on a stopped belt came back in alarm red.
+//
+// Reserve `urgent` for the cases where the plugin itself is not working, and
+// give the rest the accent role: attention, not failure. No hue is chosen here;
+// both come from the theme (spec §5.5).
+var ADVISORY_CODES = [
+  "stop_unsafe",
+  "stale_link",
+  "standby",
+  "repeat_suppressed",
+  "start_unconfirmed"
+]
+
+function isAdvisory(errorCode) {
+  return ADVISORY_CODES.indexOf(errorCode) !== -1
+}
+
 // True when the pad is reachable but will ignore anything we send, so the panel
 // can explain instead of offering controls that quietly do nothing.
 function inert(linkState, mode) {

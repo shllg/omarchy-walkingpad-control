@@ -81,6 +81,9 @@ class Bridge:
         # (speed, armed_at) while a start is waiting for the belt to move, so
         # the intended speed can be sent inside the window fact 12 describes.
         self._pending_start = None
+        # A standing intention the belt is walked toward, one step per status
+        # frame. None means nobody has asked for anything.
+        self.goal_speed = None
         self._loop = None
         self._running = True
 
@@ -104,7 +107,7 @@ class Bridge:
         # An unknown command has nothing to refuse, and reporting "refusing to
         # move the belt" for one would put a wrong error code on the wire for
         # Stage 2 to misread.
-        if cmd not in ("stop", "speed", "start"):
+        if cmd not in ("stop", "speed", "start", "goal"):
             return None
 
         # ⚠ STOP IS DELIBERATELY EXEMPT FROM THIS.
@@ -133,9 +136,13 @@ class Bridge:
         # ~0.25 km/h per second. So a burst of clicks still resolves to the same
         # clamped number and still collapses to one write -- the suppression
         # keeps working on real bursts, and stops firing on real changes.
+        #
+        # `goal` is exempt too, for a different reason: it writes nothing to the
+        # pad, so there is no burst to throttle. Throttling it would only put a
+        # red refusal under a button that was working correctly.
         now = time.monotonic()
         signature = (cmd, obj.get("kmh"))
-        if (cmd != "stop"
+        if (cmd not in ("stop", "goal")
                 and self._last_command is not None
                 and self._last_command[0] == signature
                 and now - self._last_command[1] < MIN_REPEAT_INTERVAL_S):
@@ -156,8 +163,10 @@ class Bridge:
                            "msg": "no recent evidence the belt is moving; sending "
                                   "stop could start it. Use the panel or remote."})
                 return None
-            # A stop must never be chased by the speed command a start armed.
+            # A stop must never be chased by a speed command that a start armed
+            # or a goal was still converging toward.
             self._pending_start = None
+            self.goal_speed = None
             self.commanded_speed = 0.0
             return frames.stop()
 
@@ -178,8 +187,9 @@ class Bridge:
             return None
 
         if cmd == "speed":
-            # An explicit speed supersedes whatever a start was going to send.
+            # An explicit one-shot speed supersedes both standing intentions.
             self._pending_start = None
+            self.goal_speed = None
             target = self.safety.clamp_speed(self.current_speed, float(obj.get("kmh", 0)))
             self.commanded_speed = target
             return frames.set_speed(target)
@@ -200,10 +210,21 @@ class Bridge:
             # the first "running" frame is the current one and the follow-up
             # would apply a speed change that never passed the per-action step
             # clamp. A start on a moving belt is just a start.
+            self.goal_speed = None
             if "kmh" in obj and self.belt != "running":
                 self.commanded_speed = self.safety.clamp_start_speed(float(obj["kmh"]))
                 self._pending_start = (self.commanded_speed, now)
             return frames.start()
+
+        if cmd == "goal":
+            # Deliberately writes NOTHING here. A goal is a standing intention,
+            # not a command, and _service_goal() is the single place that turns
+            # it into frames -- one clamped step per status frame. Keeping one
+            # writer means a burst of goal updates cannot become a burst of
+            # writes, however fast the buttons are pressed.
+            self.goal_speed = self.safety.clamp_goal(
+                self.current_speed, float(obj.get("kmh", 0)))
+            return None
         return None
 
     # -- frames in ---------------------------------------------------------
@@ -232,6 +253,7 @@ class Bridge:
         self.emit({
             "t": "status", "belt": status.belt,
             "speed": status.speed_kmh, "target": self.commanded_speed,
+            "goal": self.goal_speed,
             # What the pad has stored from the last BLE speed command. Reads 0.0
             # if the speed was set at the panel, so it is diagnostic only --
             # "target" above is the number a UI should show.
@@ -241,17 +263,25 @@ class Bridge:
         })
         # After the status goes out, so a UI sees the frame that justified the
         # command before it sees the command's own effect.
-        self._service_pending_start(status)
+        # At most ONE motion write per status frame. The start's own speed and
+        # the goal's next step are both legitimate writers, and on the frame
+        # where a start lands they would otherwise both fire -- the goal
+        # immediately overriding the speed the start had just placed.
+        if not self._service_pending_start(status):
+            self._service_goal(status)
 
-    def _service_pending_start(self, status) -> None:
+    def _service_pending_start(self, status) -> bool:
         """Send a start's intended speed once the belt is actually moving.
+
+        Returns True if it wrote a frame, so the caller can keep the goal off
+        the wire for this status frame.
 
         The window is short (fact 12) and this is the only place that can see it
         open, because the pad announces the transition in a status frame and
         acknowledges nothing.
         """
         if self._pending_start is None:
-            return
+            return False
         speed, armed_at = self._pending_start
 
         # Expiry is checked BEFORE the belt state, so a start that never took
@@ -265,14 +295,66 @@ class Bridge:
             self.emit({"t": "error", "code": "start_unconfirmed",
                        "msg": "the belt did not start within %.0fs; "
                               "no speed was sent" % START_SPEED_WINDOW_S})
-            return
+            return False
 
         # Anything else is the 3-2-1 countdown (fact 14) still running. Wait.
         if status.belt != "running":
-            return
+            return False
 
         self._pending_start = None
-        self._send(frames.set_speed(speed))
+        return self._send(frames.set_speed(speed))
+
+    def _service_goal(self, status) -> None:
+        """Walk the belt one step toward the standing goal, at most once a frame.
+
+        ⚠ This is the first thing in the bridge that writes a motion command
+        without a person having just pressed something, so every guard below is
+        load-bearing. It is bounded in four independent ways: the goal itself
+        cannot sit more than max_goal_lead from the actual speed (clamp_goal),
+        each write is still one clamp_speed() step, nothing is sent unless a
+        fresh frame says the belt is running, and it stops the moment the goal
+        is reached.
+
+        It is not the auto-retry fact 17 forbids. That rule is about re-sending
+        the SAME command on a clock, which is how the countdown-cancel-countdown
+        cycle was found. Every write here is a new, strictly closer value, and
+        the guard below refuses to repeat one.
+        """
+        if self.goal_speed is None:
+            return
+
+        # A start owns the belt until its own speed has landed (fact 12's
+        # window); two writers inside that window would fight over it.
+        if self._pending_start is not None:
+            return
+
+        # Fact 11: a speed command never starts a stopped belt, and fact 8 says
+        # "running" is the only state that means it is moving. Converging
+        # against anything else would be writing into a belt nobody is on.
+        if status.belt != "running":
+            return
+
+        # Fact 13: in standby the pad ignores motion commands entirely.
+        if self.mode == "standby":
+            return
+
+        if not self.safety.may_move(self._last_status_age()):
+            return
+
+        if abs(status.speed_kmh - self.goal_speed) < self.safety.max_step / 2:
+            self.goal_speed = None
+            return
+
+        step = self.safety.clamp_speed(status.speed_kmh, self.goal_speed)
+
+        # Refuse to say the same thing twice. If the belt is not moving toward
+        # the goal -- someone braced against it, the pad ignoring us -- this
+        # stops rather than hammering the same value once a second.
+        if self.commanded_speed is not None and step == self.commanded_speed:
+            return
+
+        self.commanded_speed = step
+        self._send(frames.set_speed(step))
 
     def _poll_interval(self) -> float:
         # A pending start is waiting for a window measured in seconds (fact 12),

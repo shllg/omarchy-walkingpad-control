@@ -18,6 +18,11 @@ Item {
   property real maxSpeed: 6.0
   property real speedStep: 0.5
   property real startSpeed: 2.0
+  // Mirrors Safety.MAX_GOAL_LEAD_KMH / MIN_GOAL_KMH so the number on screen is
+  // the number the bridge will accept. The bridge clamps again regardless --
+  // these exist so the UI never shows a goal that is quietly going to be cut.
+  property real maxGoalLead: 1.0
+  property real minGoal: 0.5
 
   readonly property string linkState: state.linkState
   readonly property string linkMessage: state.linkMessage
@@ -37,10 +42,18 @@ Item {
   // click is visibly acknowledged before any frame could confirm it.
   readonly property var pendingSpeed: state.pendingSpeed
 
-  // What a UI should show as the target: the local intent while it is still
-  // settling, otherwise whatever the bridge says it last commanded.
-  readonly property var targetSpeed: state.pendingSpeed !== null
-    ? state.pendingSpeed : state.commandedSpeed
+  // The standing goal the bridge is walking the belt toward, and the local
+  // optimistic copy held while a press is still settling.
+  readonly property var goalSpeed: state.pendingGoal !== null
+    ? state.pendingGoal : state.goalSpeed
+
+  // What a UI should show as the target. A live goal outranks the intermediate
+  // step the bridge is currently commanding: the goal is what the person asked
+  // for, and commandedSpeed is just how far along the way the belt has been
+  // told to go this second.
+  readonly property var targetSpeed: root.goalSpeed !== null
+    ? root.goalSpeed
+    : (state.pendingSpeed !== null ? state.pendingSpeed : state.commandedSpeed)
 
   readonly property bool bridgeAlive: bridgeProc.running
 
@@ -89,10 +102,21 @@ Item {
     interval: 4000
   }
 
+  // Explicit dismissal, which outranks the dwell timer: the dwell exists to
+  // stop an impatient second press from wiping the explanation, not to hold a
+  // message against someone who has deliberately closed the panel.
+  function clearError() {
+    errorDwell.stop()
+    state.lastErrorCode = ""
+    state.lastErrorMessage = ""
+  }
+
   // Fact 12: the pad ramps to ~3.5 km/h on START whatever speed it has stored.
   // The bridge owns the two-part sequence; passing kmh is what arms it.
   function start() {
     state.pendingSpeed = null
+    state.pendingGoal = null
+    goalDebounce.stop()
     speedDebounce.stop()
     send({ cmd: "start", kmh: root.startSpeed })
   }
@@ -102,28 +126,58 @@ Item {
   // Fact 18: stop is never throttled, so it is never debounced either.
   function stop() {
     state.pendingSpeed = null
+    state.pendingGoal = null
+    goalDebounce.stop()
     speedDebounce.stop()
     send({ cmd: "stop" })
   }
 
+  // One-shot speed, kept for callers that want a single command rather than a
+  // standing intention. The buttons use setGoal().
   function setSpeed(kmh) {
     var value = Math.max(0, Math.min(root.maxSpeed, Number(kmh)))
+    state.pendingGoal = null
     state.pendingSpeed = Math.round(value * 10) / 10
     // Spec §5.2: rapid clicks must not become rapid writes. One command goes
     // out for the settled value, never one per click.
     speedDebounce.restart()
   }
 
-  // Step from the ACTUAL speed, not from the pending value: the pad clamps each
-  // command to one step from where the belt really is, so accumulating clicks
-  // locally would display a target the belt was never going to reach.
-  function speedBy(delta) {
+  function clampGoal(kmh) {
     var base = state.hasStatus ? state.currentSpeed : 0
-    setSpeed(base + delta)
+    var high = Math.min(root.maxSpeed, base + root.maxGoalLead)
+    var low = Math.max(root.minGoal, base - root.maxGoalLead)
+    if (low > high) low = high
+    return Math.round(Math.max(low, Math.min(high, Number(kmh))) * 10) / 10
+  }
+
+  function setGoal(kmh) {
+    state.pendingSpeed = null
+    state.pendingGoal = clampGoal(kmh)
+    goalDebounce.restart()
+  }
+
+  // Steps the GOAL, not the belt. Pressing down after up moves the same
+  // standing intention rather than queueing a second action, which is the whole
+  // point of a goal: the buttons stay live while the belt is still catching up.
+  function speedBy(delta) {
+    var base = root.goalSpeed !== null
+      ? Number(root.goalSpeed)
+      : (state.hasStatus ? state.currentSpeed : 0)
+    setGoal(base + delta)
   }
 
   function speedUp() { speedBy(root.speedStep) }
   function speedDown() { speedBy(-root.speedStep) }
+
+  Timer {
+    id: goalDebounce
+    interval: 250
+    onTriggered: {
+      if (state.pendingGoal === null) return
+      root.send({ cmd: "goal", kmh: state.pendingGoal })
+    }
+  }
 
   Timer {
     id: speedDebounce
@@ -146,6 +200,11 @@ Item {
     state.hasStatus = true
     state.currentSpeed = Number(event.speed)
     state.commandedSpeed = event.target === null ? null : Number(event.target)
+    state.goalSpeed = (event.goal === null || event.goal === undefined)
+      ? null : Number(event.goal)
+    // The optimistic copy has done its job once the bridge is echoing a goal
+    // and nothing further is queued to send.
+    if (!goalDebounce.running) state.pendingGoal = null
     state.padSetSpeed = Number(event.pad_set_speed)
     state.mode = String(event.mode)
     state.elapsedSec = Number(event.time)
@@ -175,6 +234,8 @@ Item {
     state.linkMessage = String(event.msg || "")
     state.hasStatus = false
     state.pendingSpeed = null
+    state.pendingGoal = null
+    state.goalSpeed = null
     state.lastErrorCode = ""
     state.lastErrorMessage = ""
   }
@@ -221,6 +282,8 @@ Item {
     property real currentSpeed: 0
     property var commandedSpeed: null
     property var pendingSpeed: null
+    property var goalSpeed: null
+    property var pendingGoal: null
     property real padSetSpeed: 0
     property string mode: "unknown"
     property int elapsedSec: 0
@@ -253,7 +316,10 @@ Item {
     onExited: function(exitCode, exitStatus) {
       state.hasStatus = false
       state.pendingSpeed = null
-      // A new process has no memory of what the old one commanded.
+      // A new process has no memory of what the old one commanded, and it
+      // certainly is not still walking the belt toward a goal.
+      state.pendingGoal = null
+      state.goalSpeed = null
       state.commandedSpeed = null
 
       // Bounded respawn. This is NOT the auto-retry fact 17 forbids: that rule
