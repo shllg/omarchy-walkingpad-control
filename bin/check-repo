@@ -182,6 +182,42 @@ else
   echo "check manifest: PASS"
 fi
 
+plugin_fail() {
+  echo "check plugin: FAIL — $*" >&2
+  exit 1
+}
+
+if [[ ! -f manifest.json ]]; then
+  echo "check plugin: SKIP — manifest.json is not present"
+elif ! command -v omarchy-plugin-validate >/dev/null 2>&1; then
+  # CI runs this script on ubuntu-latest, where the Omarchy validator does not
+  # exist at all. Skipping on absence keeps the gate meaningful where it can run
+  # without turning every CI run red where it cannot.
+  echo "check plugin: SKIP — omarchy-plugin-validate is not present"
+else
+  # The validator scans a DIRECTORY, but what reaches a user is TRACKED CONTENT:
+  # `omarchy plugin add` clones this repository. Validating the working tree
+  # directly always fails, because .claude/skills/ and .codex/skills/ are the
+  # gitignored symlink trees bin/link-skills creates locally (see AGENTS.md), and
+  # the validator rejects a whole plugin on any symlink it finds. So export what
+  # actually ships -- everything git tracks or has staged, plus files present but
+  # not yet committed -- and validate that instead.
+  plugin_export_dir=$(mktemp -d)
+  trap 'rm -rf "$plugin_export_dir"' EXIT
+
+  if ! { git ls-files -z; git ls-files -z --others --exclude-standard; } \
+      | xargs -0 cp --parents --target-directory="$plugin_export_dir" --; then
+    plugin_fail "could not export the shipped file list"
+  fi
+
+  if plugin_output=$(omarchy-plugin-validate "$plugin_export_dir" 2>&1); then
+    echo "check plugin: PASS"
+  else
+    [[ -n $plugin_output ]] && echo "$plugin_output" >&2
+    plugin_fail "omarchy-plugin-validate rejected the exported plugin tree"
+  fi
+fi
+
 if python3 -m pytest tests/ -q; then
   echo "check tests: PASS"
 else
