@@ -99,8 +99,9 @@ class Bridge:
         #
         # Measured 2026-08-24: a script re-sending STOP several times a second
         # put the pad in a loop of countdown, beep, cancel, countdown. The cause
-        # was the retry loop fighting the pad's own auto-start (see below), not
-        # the pad restarting itself -- so throttling speed and start is enough.
+        # was the retry loop fighting the stop opcode's own toggle behaviour
+        # (see below), not the pad restarting itself -- so throttling speed and
+        # start is enough.
         #
         # Stop must never be throttled. There is no ACK in this protocol, so a
         # lost write is invisible, and a person pressing stop a second time

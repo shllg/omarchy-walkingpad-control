@@ -24,7 +24,7 @@ STATUS_LEN  = 20             # measured: always 20 bytes on fw 6.1.2
 #
 # Measured 2026-08-24: belt == 4 is what an awake pad reports while nobody is on
 # it -- speed 0.0, mode standby, all counters zero. It is named "idle" rather
-# than "standby" so it cannot be confused with the MODE of the same name. 0 is
+# than "standby" so it cannot be confused with the MODE of the same name.
 # 0 is "stopped", now confirmed directly: it is what the pad reports in manual
 # mode with the belt still, and what it returns to after a STOP winds down.
 # Measured 2026-08-24: 9, 8, 7 are the 3-2-1 startup countdown the panel shows

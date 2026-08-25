@@ -43,9 +43,8 @@ already caused, or nearly caused, a wrong design decision.
 
 8. **`belt == 4` is the awake-and-idle state**, and it is what the pad reports for
    most of the time it is reachable at all. Mapped as `"idle"`. `belt == 0` is
-   documented upstream as "stopped" but has never been observed here — do not
-   assume the two are interchangeable. Only `"running"` means the belt is moving;
-   gate on that, never on the absence of some other value.
+   `"stopped"`, confirmed by observation — see fact 14. Only `"running"` means
+   the belt is moving; gate on that, never on the absence of some other value.
 
 9. **BlueZ's `Connected` property is NOT proof of a working link.** After an
    ungraceful kill it kept reporting `Connected=True` for a radio link that was
@@ -88,9 +87,10 @@ already caused, or nearly caused, a wrong design decision.
     error and is retracted — it was the most dangerous line in the design. The
     belt does NOT auto-start on load; that claim was also wrong and is retracted.
 
-17. **Never auto-retry a command on a timer.** A retry loop fights the auto-start
-    above and produces an endless countdown-cancel-countdown cycle, which is
-    exactly how that behaviour was discovered. One command per user action.
+17. **Never auto-retry a command on a timer.** A retry loop fights the stop
+    opcode's own toggle behaviour and produces an endless countdown-cancel-countdown
+    cycle, which is exactly how that behaviour was discovered. One command per
+    user action.
 
 18. **`stop` is never throttled**, unlike `speed` and `start`. There is no ACK, so
     a dropped write is invisible and a second press is the user's only recovery.

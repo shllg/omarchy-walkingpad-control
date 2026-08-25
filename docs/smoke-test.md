@@ -4,17 +4,17 @@
 you set.** Stand clear of the pad before starting it. Do not run this while anyone
 is on the belt.
 
-## 0. The belt starts by itself
+## 0. A stopped pad is still live
 
-⚠ **The pad detects someone standing on it and starts on its own**, with no
-command from anything here. A stopped-but-awake pad in manual mode is a live
-machine. Stand clear for every step below, and do not treat `belt: "stopped"` as
-"safe to step on".
+⚠ The belt starts from a command, the remote, or auto mode — never on its own.
+But the stop opcode (`F7 A2 04 00`) is a **toggle**: sent to a stopped belt, it
+starts it. A stopped-but-awake pad in manual mode is a live machine. Stand clear
+for every step below, and do not treat `belt: "stopped"` as "safe to step on".
 
 Corollary for anyone scripting against the bridge: **never re-send a command on a
-timer.** A retry loop fights the auto-start and produces an endless
-countdown-cancel-countdown cycle, beeping continuously. Send one command per
-action and read the status stream for the result.
+timer.** A retry loop fights the stop opcode's toggle behaviour and produces an
+endless countdown-cancel-countdown cycle, beeping continuously. Send one command
+per action and read the status stream for the result.
 
 ## 1. Prerequisites
 
