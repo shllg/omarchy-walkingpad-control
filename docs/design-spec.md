@@ -3,6 +3,9 @@
 Status: draft for review · 2026-08-24
 Target: standalone Omarchy plugin, own git repo, marketplace submission.
 
+`docs/plugin-evidence.md` records the loader, manifest, installation and
+marketplace implementation details this spec relies on.
+
 ---
 
 ## 1. Purpose
@@ -70,7 +73,7 @@ Three components, one process tree, no systemd unit, no root, no compiled binary
   │                                                             │
   │  WalkingpadWidget.qml   × N monitors   (pure view, no state)│
   │            │ reads                                          │
-  │  WalkingpadService.qml  pragma Singleton  ◄── IpcHandler ◄──┼── qs ipc call
+  │  WalkingpadService.qml  service (one per plugin id) ◄─ IpcHandler ◄─┼─ qs ipc call
   │            │ owns exactly one                               │
   │         Process ──stdio, JSON lines──┐                      │
   └──────────────────────────────────────┼──────────────────────┘
@@ -85,8 +88,11 @@ Three components, one process tree, no systemd unit, no root, no compiled binary
 
 `BarPanel` is instantiated **once per screen**. The author's machine has three.
 If the widget spawned the bridge, three bridges would contend for the pad's
-**single** BLE connection slot. The bridge is therefore owned by a
-`pragma Singleton` service and the widget is a stateless view.
+**single** BLE connection slot. The manifest therefore declares
+`kinds: ["service", "bar-widget"]` with `keepLoaded: true`; the shell's service
+loader creates exactly one service object per plugin id. Each widget reaches it
+through `bar?.shell?.serviceFor("io.github.shllg.walkingpad")` and remains a
+stateless view.
 
 ### 3.2 Why the bridge is a child process, not a daemon
 
@@ -150,9 +156,12 @@ walkingpad-bridge --replay fixtures/c2-fw6.1.2.jsonl    # no hardware needed
 
 ## 5. The QML plugin
 
-### 5.1 `WalkingpadService.qml` (pragma Singleton)
+### 5.1 `WalkingpadService.qml` (service entry point)
 
-Owns the `Process`, parses stdout via `SplitParser`, and exposes:
+Declared through `kinds: ["service", "bar-widget"]` with `keepLoaded: true` and
+loaded once per enabled plugin id by the shell's service loader. Widgets retrieve
+it through `bar?.shell?.serviceFor("io.github.shllg.walkingpad")`. It owns the
+`Process`, parses stdout via `SplitParser`, and exposes:
 
 ```
 readonly property string  linkState      // idle | scanning | connecting | connected | error
@@ -399,7 +408,13 @@ deferred, and this section has to be revisited before any of it is built.
 
 ## 7. Configuration
 
-Plugin config (Omarchy plugin settings), all optional:
+The bar injects a per-layout-entry `settings` object into a widget that exposes
+that property. The service loader does not inject settings into services. Stage 2
+must therefore choose where the service reads configuration and how the widget
+hands changes across; that source is an open design question, not a platform
+facility to assume.
+
+The intended optional values remain:
 `address` · `maxSpeed` (6.0) · `speedStep` (0.5) · `units` (kmh|mph) ·
 `autoConnect` (true) · `notifyOnConnect` (true) · `idleDisconnectSec` (0 = never)
 
@@ -426,23 +441,33 @@ Plugin config (Omarchy plugin settings), all optional:
 
 ```
 omarchy-walkingpad/
-  manifest.json          id: walkingpad, kinds: [bar-widget], allowMultiple: false
+  manifest.json          id: io.github.shllg.walkingpad
+                         kinds: [service, bar-widget], keepLoaded: true
+                         barWidget.allowMultiple: false
   WalkingpadWidget.qml
-  WalkingpadService.qml  pragma Singleton
+  WalkingpadService.qml  service entry point, one object per plugin id
   bin/walkingpad-bridge
   walkingpad/{frames,transport,safety,bridge}.py
   fixtures/c2-fw6.1.2.jsonl
   README.md  LICENSE (MIT)
 ```
 
-Marketplace submission is a PR adding the repo to `registry.json` in
-`HANCORE-linux/omarchy-plugin-marketplace`. Checked 2026-08-24: 1161 sources,
-**zero** treadmill or fitness plugins — this is the first.
+The intended id is `io.github.shllg.walkingpad`. A bare `walkingpad` is legal,
+but it squats a generic name in a namespace where ids are permanent.
+
+Marketplace submission currently goes through the issue-form template in
+`HANCORE-linux/omarchy-plugin-marketplace`, not a direct `registry.json` PR. The
+public repository must have `manifest.json`, README and licence at its root. This
+flow is pre-release infrastructure and must be checked again immediately before
+submission (`docs/plugin-evidence.md`).
 
 ## 11. Open questions
 
-1. Does `keepLoaded: true` apply to `bar-widget` kind? The service must stay alive
-   even if no bar shows the widget. Verify against the loader.
+1. ✅ **ANSWERED 2026-08-25: the `service` kind supplies the singleton.** Declare
+   `kinds: ["service", "bar-widget"]` with `keepLoaded: true`; the enabled service
+   is mounted once per plugin id whether or not a bar shows the widget, and the
+   widget retrieves it through `bar?.shell?.serviceFor(<id>)`. The first-party
+   media service is the working precedent. Verified in `docs/plugin-evidence.md`.
 2. ✅ **ANSWERED 2026-08-24: yes, START is required.** A speed command on a
    stopped belt updates the pad's stored speed and does not move the belt.
    Verified twice. §5.1 must issue `start` first, then set the speed — and must

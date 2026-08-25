@@ -20,7 +20,8 @@
 ## Constraints
 - ONE BLE connection at a time → phone app and helper are mutually exclusive.
 - BarPanel is instantiated **once per screen** (3 here) → helper MUST be owned by a
-  `pragma Singleton` service, never by the widget. Otherwise 3 helpers, 1 slot.
+  manifest `service` kind and looked up through `bar?.shell?.serviceFor(<id>)`,
+  never by the widget. Otherwise 3 helpers, 1 slot.
 - Marketplace disqualifiers (own vetting rule): binaries, sudoers/polkit, daemons.
   → source-only Python, child process of the shell, no systemd unit, no root.
 - Plugin manifest v1: id/name/version/author/description/kinds/entryPoints,
