@@ -1,0 +1,160 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Only COMMITTED content reaches a user: `omarchy plugin add` clones this
+# repository into the plugins directory, and the validator rejects the whole
+# plugin if it finds a symlink there. Local symlinks that are never committed
+# cannot reach anyone, which is why the runtime skill trees under
+# .claude/skills/ and .codex/skills/ are gitignored rather than banned.
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "check symlinks: FAIL — not inside a git work tree, so tracked content cannot be read" >&2
+  exit 1
+fi
+links=$(git ls-files -s | awk -F'\t' '$1 ~ /^120000/ { print $2 }')
+if [[ -n $links ]]; then
+  links=${links//$'\n'/, }
+  echo "check symlinks: FAIL — a committed symlink makes the Omarchy plugin validator reject the whole plugin: $links" >&2
+  echo "  Skill symlinks belong in the gitignored .claude/skills/ and .codex/skills/ trees; run bin/link-skills." >&2
+  exit 1
+fi
+echo "check symlinks: PASS"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "check runtime imports: FAIL — python3 is required" >&2
+  exit 1
+fi
+
+if import_failures=$(python3 - <<'PY'
+import ast
+from pathlib import Path
+import sys
+
+paths = sorted(Path("walkingpad").rglob("*.py"))
+paths.append(Path("bin/walkingpad-bridge"))
+allowed = set(sys.stdlib_module_names) | {"gi", "walkingpad"}
+failures = []
+
+for path in paths:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError) as error:
+        failures.append(f"{path}: cannot parse imports ({error})")
+        continue
+
+    for node in ast.walk(tree):
+        modules = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                continue
+            modules = [node.module or ""]
+
+        for module in modules:
+            top_level = module.split(".", 1)[0]
+            if top_level and top_level not in allowed:
+                failures.append(f"{path}: module '{module}'")
+
+if failures:
+    print("; ".join(failures))
+    raise SystemExit(1)
+PY
+); then
+  echo "check runtime imports: PASS"
+else
+  echo "check runtime imports: FAIL — a plugin cannot install a dependency; offending imports: $import_failures" >&2
+  exit 1
+fi
+
+if [[ ! -f bin/walkingpad-bridge ]]; then
+  echo "check entry point: FAIL — bin/walkingpad-bridge is missing" >&2
+  exit 1
+fi
+if [[ ! -x bin/walkingpad-bridge ]]; then
+  echo "check entry point: FAIL — bin/walkingpad-bridge is not executable" >&2
+  exit 1
+fi
+first_line=""
+IFS= read -r first_line < bin/walkingpad-bridge || true
+if [[ $first_line != '#!/usr/bin/python3' ]]; then
+  echo "check entry point: FAIL — bin/walkingpad-bridge must start with exactly #!/usr/bin/python3" >&2
+  exit 1
+fi
+echo "check entry point: PASS"
+
+manifest_fail() {
+  echo "check manifest: FAIL — $*" >&2
+  exit 1
+}
+
+if [[ ! -f manifest.json ]]; then
+  echo "check manifest: SKIP — manifest.json is not present"
+else
+  command -v jq >/dev/null 2>&1 || manifest_fail "jq is required when manifest.json exists"
+  jq -e . manifest.json >/dev/null 2>&1 || manifest_fail "manifest.json is not valid JSON"
+  jq -e '.schemaVersion == 1' manifest.json >/dev/null 2>&1 \
+    || manifest_fail "schemaVersion must be the JSON number 1"
+
+  for field in id name version kinds entryPoints; do
+    jq -e --arg field "$field" 'has($field)' manifest.json >/dev/null 2>&1 \
+      || manifest_fail "required field '$field' is missing"
+  done
+
+  plugin_id=$(jq -r '.id // ""' manifest.json)
+  [[ -n $plugin_id ]] || manifest_fail "id is empty"
+  [[ $plugin_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || manifest_fail "id '$plugin_id' is invalid"
+  [[ $plugin_id != *".."* ]] || manifest_fail "id '$plugin_id' contains '..'"
+  [[ $plugin_id != omarchy.* ]] || manifest_fail "id '$plugin_id' uses the reserved omarchy.* namespace"
+
+  jq -e '(.kinds | type) == "array" and (.kinds | length) > 0' manifest.json >/dev/null 2>&1 \
+    || manifest_fail "kinds must be a non-empty array"
+  jq -e '(.entryPoints | type) == "object"' manifest.json >/dev/null 2>&1 \
+    || manifest_fail "entryPoints must be an object"
+
+  jq -e '
+    if ((.barWidget? | type) == "object" and (.barWidget | has("defaultSection"))) then
+      .barWidget.defaultSection as $section
+      | ($section | type) == "string"
+        and (["left", "center", "right"] | index($section)) != null
+    else
+      true
+    end
+  ' manifest.json >/dev/null 2>&1 \
+    || manifest_fail "barWidget.defaultSection must be left, center or right"
+
+  while IFS= read -r entry_json; do
+    [[ -n $entry_json ]] || continue
+    entry_point=$(jq -r '.' <<<"$entry_json")
+    [[ -n $entry_point ]] || manifest_fail "an entry-point path is empty"
+    [[ $entry_point != *$'\n'* ]] || manifest_fail "entry point '$entry_point' contains a newline"
+    [[ $entry_point != /* ]] || manifest_fail "entry point '$entry_point' is not relative"
+    [[ $entry_point != *".."* ]] || manifest_fail "entry point '$entry_point' contains '..'"
+    [[ -f "./$entry_point" ]] || manifest_fail "entry-point file '$entry_point' does not exist"
+  done < <(jq -c '.entryPoints | to_entries[] | .value' manifest.json)
+
+  for kind_entry_point in \
+    "bar:bar" \
+    "bar-widget:barWidget" \
+    "menu:menu" \
+    "overlay:overlay" \
+    "panel:panel" \
+    "service:service"; do
+    kind=${kind_entry_point%%:*}
+    entry_point=${kind_entry_point##*:}
+    jq -e --arg kind "$kind" '(.kinds | index($kind)) != null' manifest.json >/dev/null 2>&1 \
+      || continue
+    jq -e --arg entry_point "$entry_point" '.entryPoints | has($entry_point)' manifest.json >/dev/null 2>&1 \
+      || manifest_fail "kind '$kind' requires entryPoints.$entry_point"
+  done
+
+  echo "check manifest: PASS"
+fi
+
+if python3 -m pytest tests/ -q; then
+  echo "check tests: PASS"
+else
+  echo "check tests: FAIL — python3 -m pytest tests/ -q failed" >&2
+  exit 1
+fi

@@ -137,6 +137,24 @@ bridge itself does not need it.
 Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing
 clear. It also carries the open Q2 cold-start procedure.
 
+## Plugin boundary
+
+This repository is the installed plugin. `omarchy plugin add` clones it into the
+user's plugins directory, so everything committed here ships to users and is
+scanned before installation. No symlink may be committed: one tracked symlink
+makes the validator reject the whole plugin for every user. Local symlinks that
+are never committed cannot reach anyone, which is why the runtime skill trees
+below are gitignored rather than banned.
+
+No new runtime dependency. The manifest has no dependency field and the install
+path has no hook (ADR D-3); deliberately, the bridge imports only the standard
+library and `gi.repository` Gio/GLib. `bin/walkingpad-bridge` stays executable with
+its `#!/usr/bin/python3` shebang.
+
+The plugin runtime has no daemon, systemd unit, sudo or polkit use, installer,
+bundled binary, or network access. No personal or machine-specific content belongs
+in tracked files.
+
 ## Repository skills
 
 The skills themselves are regular files under `.agents/skills/`, which is the
