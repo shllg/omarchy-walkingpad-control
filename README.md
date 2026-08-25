@@ -17,7 +17,7 @@ Running the tests additionally needs `pytest`: `sudo pacman -S python-pytest`.
 
 ## Usage
 
-    ./bin/walkingpad-bridge [--max-speed 6.0] [--max-step 0.5]
+    ./bin/walkingpad-bridge [--max-speed 6.0] [--max-step 0.5] [--replay PATH]
 
 It writes one JSON object per line to stdout and reads one JSON object per line
 from stdin. Out:
@@ -135,6 +135,27 @@ an executable `bin/walkingpad-bridge` with the expected shebang, the manifest
 checks, and the test suite. GitHub Actions runs the same script on every push, so
 a local pass and a green build cannot drift apart. Needs `jq` in addition to the
 test dependency below.
+
+### Replay
+
+    ./bin/walkingpad-bridge --replay fixtures/c2-fw6.1.2.jsonl
+
+This plays captured status frames with no hardware and no Bluetooth at all, so
+the bridge and the coming QML layer can be exercised without the physical pad.
+This matters because the pad sleeps and stops advertising entirely, and BLE
+cannot wake it; only the physical panel or remote can. For most of a working day,
+there may be no pad reachable to develop against at all.
+
+Replay is a frame player, not a pad simulator. It answers each poll with the next
+captured status frame, matching the real pad: every frame observed from the pad
+was a reply to a poll query, and replay invents nothing. Start, stop, and speed
+commands are logged to stderr and ignored, with no acknowledgement. That is
+intentional because the real protocol has no ACK; a synthetic reply would teach
+the UI behaviour the real pad does not have. A successful replay run does not
+mean a command worked against a real pad.
+
+The fixture covers the running, idle, starting, and stopped belt states. Playback
+loops back to the start when it reaches the end of the file.
 
 ### Tests
 

@@ -5,6 +5,7 @@ import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from walkingpad.bridge import Bridge
+from walkingpad.replay import ReplayFixtureError, ReplayTransport
 from walkingpad.safety import Safety
 
 if __name__ == "__main__":
@@ -13,9 +14,27 @@ if __name__ == "__main__":
                     help="absolute ceiling in km/h (spec §7)")
     ap.add_argument("--max-step", type=float, default=0.5,
                     help="largest speed change a single command may make")
+    ap.add_argument("--replay", metavar="PATH",
+                    help="play captured status frames instead of using Bluetooth")
     args = ap.parse_args()
     safety = Safety(max_speed=args.max_speed, max_step=args.max_step)
+    transport = None
+    replay_stdin_writer = None
+    if args.replay is not None:
+        try:
+            transport = ReplayTransport(args.replay)
+        except ReplayFixtureError as exc:
+            ap.error(str(exc))
+        # Replay is also the no-input development path. An explicit /dev/null
+        # otherwise reports EOF before GLib runs the first poll, so hold only
+        # that source open; real parent pipes still stop the bridge on EOF.
+        if os.path.samestat(os.fstat(sys.stdin.fileno()), os.stat(os.devnull)):
+            replay_stdin, replay_stdin_writer = os.pipe()
+            sys.stdin = os.fdopen(replay_stdin, "r")
     try:
-        Bridge(safety=safety).run()
+        Bridge(safety=safety, transport=transport).run()
     except KeyboardInterrupt:
         pass
+    finally:
+        if replay_stdin_writer is not None:
+            os.close(replay_stdin_writer)
