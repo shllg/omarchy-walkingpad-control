@@ -44,6 +44,7 @@ IDLE_AFTER_S = 60.0
 RESCAN_BACKOFF_S = 30.0        # the pad SLEEPS; absence is normal, do not storm
 LINK_DEAD_AFTER_S = 15.0       # silence this long means the link is gone, not quiet
 MIN_REPEAT_INTERVAL_S = 1.0    # a repeated command inside this window is dropped
+START_SPEED_WINDOW_S = 8.0     # how long a start may wait for the belt to move
 MAX_CONSECUTIVE_BAD_FRAMES = 10  # spec §8
 
 
@@ -69,6 +70,9 @@ class Bridge:
         self._bad_frames = 0
         self._stdin_buffer = b""
         self._last_command = None
+        # (speed, armed_at) while a start is waiting for the belt to move, so
+        # the intended speed can be sent inside the window fact 12 describes.
+        self._pending_start = None
         self._loop = None
         self._running = True
 
@@ -109,17 +113,30 @@ class Bridge:
         # that retry leaves someone on a moving belt. A spammed stop merely
         # cancels start attempts; a swallowed one does not stop the belt. The
         # first failure is far worse than the second.
+        # The signature includes the requested speed, so "identical" means what
+        # the message says. Keying on the command NAME alone made two DIFFERENT
+        # speeds inside the window collide, and the second was dropped in
+        # silence -- indistinguishable, from the bar, from a speed command the
+        # pad ignored. That is exactly the reading that would talk someone into
+        # weakening a safety gate.
+        #
+        # Allowing distinct values back through adds no hazard: every speed is
+        # still clamped to one step from the ACTUAL belt speed, which moves only
+        # ~0.25 km/h per second. So a burst of clicks still resolves to the same
+        # clamped number and still collapses to one write -- the suppression
+        # keeps working on real bursts, and stops firing on real changes.
         now = time.monotonic()
+        signature = (cmd, obj.get("kmh"))
         if (cmd != "stop"
                 and self._last_command is not None
-                and self._last_command[0] == cmd
+                and self._last_command[0] == signature
                 and now - self._last_command[1] < MIN_REPEAT_INTERVAL_S):
             self.emit({"t": "error", "code": "repeat_suppressed",
                        "msg": "identical '%s' within %.1fs dropped; "
                               "stop is never throttled"
                               % (cmd, MIN_REPEAT_INTERVAL_S)})
             return None
-        self._last_command = (cmd, now)
+        self._last_command = (signature, now)
 
         # ⚠ Stop is NOT unconditional, because the stop opcode is a toggle that
         # STARTS a stopped belt (measured 2026-08-25; see frames.stop). Firing it
@@ -131,6 +148,8 @@ class Bridge:
                            "msg": "no recent evidence the belt is moving; sending "
                                   "stop could start it. Use the panel or remote."})
                 return None
+            # A stop must never be chased by the speed command a start armed.
+            self._pending_start = None
             self.commanded_speed = 0.0
             return frames.stop()
 
@@ -151,10 +170,31 @@ class Bridge:
             return None
 
         if cmd == "speed":
+            # An explicit speed supersedes whatever a start was going to send.
+            self._pending_start = None
             target = self.safety.clamp_speed(self.current_speed, float(obj.get("kmh", 0)))
             self.commanded_speed = target
             return frames.set_speed(target)
         if cmd == "start":
+            # Fact 12: the pad ramps to ~3.5 km/h on START whatever speed it has
+            # stored, and IGNORES a speed command while the belt is stopped. So
+            # the intended speed cannot be sent with the start -- it has to land
+            # after the belt is actually moving, in the ~2 s window at
+            # belt=running, speed=0.0. Arm it here; _service_pending_start fires
+            # it off the status stream.
+            #
+            # This is NOT the timer retry fact 17 forbids. It is the second half
+            # of ONE user action, triggered by an observed state change rather
+            # than a clock, sent at most once, and discarded if the belt never
+            # starts. Nothing is ever re-sent.
+            #
+            # Arming is skipped when the belt is already running, because then
+            # the first "running" frame is the current one and the follow-up
+            # would apply a speed change that never passed the per-action step
+            # clamp. A start on a moving belt is just a start.
+            if "kmh" in obj and self.belt != "running":
+                self.commanded_speed = self.safety.clamp_start_speed(float(obj["kmh"]))
+                self._pending_start = (self.commanded_speed, now)
             return frames.start()
         return None
 
@@ -191,6 +231,40 @@ class Bridge:
             "mode": status.mode, "time": status.elapsed_s,
             "dist_km": status.distance_km, "steps": status.steps,
         })
+        # After the status goes out, so a UI sees the frame that justified the
+        # command before it sees the command's own effect.
+        self._service_pending_start(status)
+
+    def _service_pending_start(self, status) -> None:
+        """Send a start's intended speed once the belt is actually moving.
+
+        The window is short (fact 12) and this is the only place that can see it
+        open, because the pad announces the transition in a status frame and
+        acknowledges nothing.
+        """
+        if self._pending_start is None:
+            return
+        speed, armed_at = self._pending_start
+
+        # Expiry is checked BEFORE the belt state, so a start that never took
+        # -- a lost write, a pad that refused -- disarms instead of lingering.
+        # Without this, a stale pending would fire whenever the belt next moved,
+        # which could be an hour later when someone starts it at the panel: a
+        # speed command nobody asked for, from an action they had forgotten.
+        if time.monotonic() - armed_at > START_SPEED_WINDOW_S:
+            self._pending_start = None
+            self.commanded_speed = None
+            self.emit({"t": "error", "code": "start_unconfirmed",
+                       "msg": "the belt did not start within %.0fs; "
+                              "no speed was sent" % START_SPEED_WINDOW_S})
+            return
+
+        # Anything else is the 3-2-1 countdown (fact 14) still running. Wait.
+        if status.belt != "running":
+            return
+
+        self._pending_start = None
+        self._send(frames.set_speed(speed))
 
     def _poll_interval(self) -> float:
         if self._stopped_since and (time.monotonic() - self._stopped_since) > IDLE_AFTER_S:
@@ -223,16 +297,22 @@ class Bridge:
             return
         if payload is None:
             return
+        self._send(payload)
+
+    def _send(self, payload: bytes) -> bool:
+        """Write one frame, reporting rather than swallowing a failure."""
         if not self.transport.connected:
             # Said out loud rather than dropped: a stop that never reached the
             # pad must not look like a stop that did.
             self.emit({"t": "error", "code": "no_link",
                        "msg": "not connected to the pad"})
-            return
+            return False
         try:
             self.transport.write(payload)
         except Exception as exc:
             self.emit({"t": "link", "state": "lost", "msg": str(exc)})
+            return False
+        return True
 
     # -- link --------------------------------------------------------------
     def _service_link(self) -> float:

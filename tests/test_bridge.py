@@ -227,3 +227,27 @@ def test_different_commands_are_not_suppressed():
     b.emit = lambda o: None
     assert b.handle_command({"cmd": "start"}) == frames.start()
     assert b.handle_command({"cmd": "speed", "kmh": 2.5}) == frames.set_speed(2.5)
+
+
+def test_two_different_speeds_are_not_suppressed_as_a_repeat():
+    # Keying suppression on the command NAME alone made these collide, and the
+    # second was dropped in silence -- from the bar, indistinguishable from a
+    # speed command the pad ignored.
+    b = make_bridge()
+    emitted = []
+    b.emit = emitted.append
+    assert b.handle_command({"cmd": "speed", "kmh": 2.5}) == frames.set_speed(2.5)
+    assert b.handle_command({"cmd": "speed", "kmh": 3.0}) == frames.set_speed(3.0)
+    assert emitted == []
+
+
+def test_a_burst_of_identical_speeds_still_collapses_to_one_write():
+    # The clamp is what makes the suppression still bite: the belt ramps at
+    # ~0.25 km/h per second, so mashing a step button resolves to the same
+    # requested number until the belt has actually moved.
+    b = make_bridge()
+    emitted = []
+    b.emit = emitted.append
+    assert b.handle_command({"cmd": "speed", "kmh": 3.0}) == frames.set_speed(3.0)
+    assert b.handle_command({"cmd": "speed", "kmh": 3.0}) is None
+    assert [e["code"] for e in emitted] == ["repeat_suppressed"]

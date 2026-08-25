@@ -17,13 +17,19 @@ know what state the belt is in, and issuing motion commands blind is not
 acceptable. Stopping is exempt -- see bridge.py.
 """
 
+# Measured 2026-08-24: the pad ramps to roughly this on START whatever speed it
+# has stored, and ignores a speed command sent while it is stopped.
+PAD_START_SPEED_KMH = 3.5
+
 
 class Safety:
     def __init__(self, max_speed: float = 6.0, max_step: float = 0.5,
-                 stale_after_s: float = 3.0):
+                 stale_after_s: float = 3.0,
+                 pad_start_speed: float = PAD_START_SPEED_KMH):
         self.max_speed = max_speed
         self.max_step = max_step
         self.stale_after_s = stale_after_s
+        self.pad_start_speed = pad_start_speed
 
     def clamp_speed(self, current: float, requested: float) -> float:
         low = current - self.max_step
@@ -32,6 +38,25 @@ class Safety:
         value = min(value, self.max_speed)
         value = max(value, 0.0)
         return round(value, 1)
+
+    def clamp_start_speed(self, requested: float) -> float:
+        """Speed to command in the window just after START.
+
+        Deliberately NOT clamp_speed(). That one governs a CHANGE to a belt
+        already moving, and measures the change against the current speed. In
+        the start window the current speed is 0.0, so routing a start through it
+        would clamp every start to 0.5 km/h -- never what the caller asked for.
+
+        The real hazard here is the pad's own behaviour: measured 2026-08-24, it
+        ramps to ~3.5 km/h on START regardless of the speed it has stored, and
+        ignores a speed command issued while the belt is stopped. The belt is
+        going to 3.5 whatever we do. The only useful thing to send in that
+        window is a LOWER number, so the cap is the pad's own start speed. That
+        makes the property provable rather than argued: this can slow a start
+        down, and has no way to speed one up.
+        """
+        value = min(requested, self.pad_start_speed, self.max_speed)
+        return round(max(value, 0.0), 1)
 
     def may_move(self, last_status_age_s: float) -> bool:
         return last_status_age_s <= self.stale_after_s
