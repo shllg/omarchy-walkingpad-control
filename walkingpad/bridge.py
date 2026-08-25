@@ -39,7 +39,15 @@ from walkingpad.safety import Safety
 from walkingpad.transport import Transport
 
 POLL_INTERVAL_S = 1.0          # while the belt is moving
-IDLE_POLL_INTERVAL_S = 5.0     # after a minute stopped, keep the radio quiet
+# ⚠ MUST stay below Safety.stale_after_s, and tests/test_bridge.py asserts it.
+#
+# This was 5.0 against a 3.0 s gate, which meant that once the pad had been idle
+# a minute, a status frame was older than the gate allows for 2 of every 5
+# seconds. Measured on hardware 2026-08-25: 40% of button presses came back
+# `stale_link` and the belt did not move. It reads as a flaky plugin, and the
+# obvious "fix" from that symptom is to loosen the staleness gate -- which is a
+# safety gate. Keeping the radio quiet must never cost more than the gate allows.
+IDLE_POLL_INTERVAL_S = 2.0
 IDLE_AFTER_S = 60.0
 RESCAN_BACKOFF_S = 30.0        # the pad SLEEPS; absence is normal, do not storm
 LINK_DEAD_AFTER_S = 15.0       # silence this long means the link is gone, not quiet
@@ -267,6 +275,13 @@ class Bridge:
         self._send(frames.set_speed(speed))
 
     def _poll_interval(self) -> float:
+        # A pending start is waiting for a window measured in seconds (fact 12),
+        # and it can only be seen in a status frame. Backing off here would let
+        # the pad reach its own 3.5 km/h between two polls and the follow-up
+        # speed would land after the moment it was meant for -- so poll fast
+        # from the moment start is sent until the belt is actually moving.
+        if self._pending_start is not None:
+            return POLL_INTERVAL_S
         if self._stopped_since and (time.monotonic() - self._stopped_since) > IDLE_AFTER_S:
             return IDLE_POLL_INTERVAL_S
         return POLL_INTERVAL_S

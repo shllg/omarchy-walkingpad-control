@@ -3,7 +3,7 @@ import json
 # tests/test_bridge.py
 import time
 
-from walkingpad.bridge import Bridge, MIN_REPEAT_INTERVAL_S
+from walkingpad.bridge import Bridge, IDLE_POLL_INTERVAL_S, MIN_REPEAT_INTERVAL_S
 from walkingpad import frames
 
 
@@ -251,3 +251,26 @@ def test_a_burst_of_identical_speeds_still_collapses_to_one_write():
     assert b.handle_command({"cmd": "speed", "kmh": 3.0}) == frames.set_speed(3.0)
     assert b.handle_command({"cmd": "speed", "kmh": 3.0}) is None
     assert [e["code"] for e in emitted] == ["repeat_suppressed"]
+
+
+def test_the_idle_poll_never_outlasts_the_staleness_gate():
+    # Measured on hardware 2026-08-25: with a 5.0 s idle poll against a 3.0 s
+    # gate, 40% of button presses came back `stale_link` and the belt did not
+    # move. It reads as a flaky plugin, and the obvious fix from that symptom is
+    # to loosen the gate -- which is a safety gate. Assert the relationship
+    # instead, so the next person tuning the radio has to see it.
+    from walkingpad.bridge import IDLE_POLL_INTERVAL_S
+    from walkingpad.safety import Safety
+    assert IDLE_POLL_INTERVAL_S < Safety().stale_after_s
+
+
+def test_a_pending_start_keeps_the_poll_fast():
+    # The start window is seconds wide and only visible in a status frame, so
+    # backing off during it would let the pad reach its own 3.5 km/h unseen.
+    import time as _time
+    from walkingpad.bridge import POLL_INTERVAL_S
+    b = make_bridge()
+    b._stopped_since = _time.monotonic() - 600
+    assert b._poll_interval() == IDLE_POLL_INTERVAL_S
+    b.handle_command({"cmd": "start", "kmh": 2.0})
+    assert b._poll_interval() == POLL_INTERVAL_S

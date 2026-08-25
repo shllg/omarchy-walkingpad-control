@@ -50,9 +50,17 @@ Item {
 
   // Fact 2: reported speed is ACTUAL and the pad ramps ~0.25 km/h per second,
   // with no ACK anywhere. Without this a click looks failed for two seconds.
+  // The deadband is wider than it looks like it needs to be. The pad reports
+  // speed in tenths, and a running belt hunts around its target by one tenth,
+  // so a 0.05 threshold flipped this true/false roughly every other frame --
+  // recorded on hardware 2026-08-25 as the label alternating Ramping/Running
+  // fourteen times in one 60 s walk. Anything under a step and a half is the
+  // pad holding its speed, not travelling to a new one.
+  readonly property real rampDeadband: 0.15
+
   readonly property bool ramping: state.hasStatus
     && root.targetSpeed !== null
-    && Math.abs(state.currentSpeed - Number(root.targetSpeed)) >= 0.05
+    && Math.abs(state.currentSpeed - Number(root.targetSpeed)) >= root.rampDeadband
 
   // -- commands -------------------------------------------------------------
 
@@ -63,11 +71,22 @@ Item {
       return false
     }
     // A new action supersedes the last refusal, so a stale message never sits
-    // under a button the user has since pressed again.
-    state.lastErrorCode = ""
-    state.lastErrorMessage = ""
+    // under a button the user has since pressed again -- but not before it has
+    // been readable. Reported from hardware 2026-08-25: refusals "flickered,
+    // too fast to read", because pressing the button again is the natural
+    // response to a button that did nothing, and that press cleared the very
+    // message explaining why. The dwell timer holds it regardless.
+    if (!errorDwell.running) {
+      state.lastErrorCode = ""
+      state.lastErrorMessage = ""
+    }
     bridgeProc.write(JSON.stringify(obj) + "\n")
     return true
+  }
+
+  Timer {
+    id: errorDwell
+    interval: 4000
   }
 
   // Fact 12: the pad ramps to ~3.5 km/h on START whatever speed it has stored.
@@ -168,6 +187,8 @@ Item {
     // coherent for imperative readers; bindings settle either way.
     state.lastErrorMessage = String(event.msg || "")
     state.lastErrorCode = String(event.code || "")
+    // Hold this one on screen even if the user immediately presses again.
+    if (state.lastErrorCode !== "") errorDwell.restart()
     // The bridge gave up on a start it had armed, so drop the optimistic
     // target with it rather than showing a speed nothing is heading for.
     if (state.lastErrorCode === "start_unconfirmed") state.pendingSpeed = null
