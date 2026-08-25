@@ -2,6 +2,19 @@
 """Entry point for the WalkingPad bridge. See walkingpad/bridge.py."""
 import argparse, os, sys
 
+# ⚠ Load-bearing, and it must run BEFORE the first walkingpad import.
+#
+# This repository IS the installed plugin, so these modules are imported from
+# inside the user's plugins directory. The shell watches that directory with
+# `inotifywait -m -r -e close_write,create,delete,move` and no --exclude
+# (omarchy/shell/services/PluginRegistry.qml), so Python writing
+# walkingpad/__pycache__/*.pyc there looks exactly like the plugin changing:
+# it fires a full reloadPlugins(), which bounces every other plugin's service
+# and kills this bridge mid-scan -- triggered by nothing but its own first
+# import. Set here rather than in the QML so it also holds when the bridge is
+# run by hand.
+sys.dont_write_bytecode = True
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from walkingpad.bridge import Bridge
