@@ -1,8 +1,8 @@
 # Hardware smoke test
 
-⚠ **Part 3 MOVES THE BELT, and the pad starts at ~3.5 km/h no matter what speed
-you set.** Stand clear of the pad before starting it. Do not run this while anyone
-is on the belt.
+⚠ **Parts 3 and 4 MOVE THE BELT, and the pad starts at ~3.5 km/h no matter what
+speed you set.** Stand clear of the pad before starting it. Do not run this while
+anyone is on the belt.
 
 ## 0. A stopped pad is still live
 
@@ -70,8 +70,190 @@ Only one BLE connection to the pad exists at a time, so close the phone app firs
 
         bluetoothctl --timeout 3 info <pad-addr> </dev/null | grep Connected
 
+## 4. Optional open question — can set-speed 0 stop safely?
+
+This procedure gathers evidence for an open question. It does not assume or
+predict the answer. No new code or raw-frame tool is needed: the existing bridge
+command `{"cmd":"speed","kmh":0}` sends exactly `f7 a2 01 00 a3 fd` when the
+last-reported actual speed is either 0.5 km/h or 0.0 km/h. From 0.5 km/h the
+per-action clamp reaches 0.0; from 0.0 km/h it stays at 0.0.
+
+⚠ The bridge repeat-suppresses `speed` and `start` by command name alone, not by
+value; `stop` is explicitly exempt. Two different `speed` requests less than 1.0
+second apart still collide. After every command in both halves, check bridge
+stdout for
+`{"t":"error","code":"repeat_suppressed",...}` before recording anything. If
+that line appears, the command was never sent to the pad and says nothing about
+the pad's behaviour. Wait at least 1.0 second, re-send that single command once,
+then record the result. This is one command per action, not a retry loop.
+
+### Half A — does it stop a running belt?
+
+11. Satisfy §1: wake the pad, confirm `mode` reads `manual`, and close the phone
+    app. Run `./bin/walkingpad-bridge` as in §2 if it is not already running,
+    then wait for a current status line. Stand clear of the belt.
+12. If the belt is not already running, start it with §3 steps 5–6. Wait for
+    `belt` to read `"running"`.
+13. Walk the reported speed down by 0.5 km/h per command. After each `speed`
+    value settles, send one request 0.5 km/h below it, then wait a few seconds
+    before the next action. After every request, check stdout before recording or
+    continuing. If `repeat_suppressed` appears, follow the rule above; an
+    unchanged speed is not evidence about the pad. Follow §0: never put these
+    commands on a timer. Stop when the status reads `belt: "running"` and
+    `speed: 0.5`.
+14. Record the `belt` and `speed` values immediately before the test command.
+15. Type `{"cmd":"speed","kmh":0}` **exactly once**, then check stdout as
+    described above before recording its result.
+16. Record the full sequence of `belt` and `speed` values afterward until the
+    belt is at rest or clearly still moving. Record whether it winds down to 0.0
+    like the existing stop opcode, or does something else.
+
+### ⚠⚠ Half B — is it inert on a stopped belt?
+
+⚠⚠ **This is the dangerous half.** If `F7 A2 01 00` is also a toggle, sending it
+to a stopped belt will START it. The pad then starts at ~3.5 km/h regardless of
+its stored speed, when nobody is expecting the ramp-up. Stand clear, with the
+panel or remote within reach, before sending anything in this half.
+
+17. Confirm the belt is stopped, the pad is awake, `mode` reads `manual`, and the
+    phone app is closed. Do not continue from a moving belt.
+18. Record the `belt` and `speed` values immediately before the test command.
+19. Type `{"cmd":"speed","kmh":0}` **exactly once. Do not repeat it** unless
+    stdout shows `repeat_suppressed`. Check stdout immediately. If that line
+    appears, the test frame never reached the pad: wait at least 1.0 second and
+    re-send this single test command once before recording any behaviour.
+20. Record the full sequence of `belt` and `speed` values afterward for at least
+    10 seconds, or through any complete startup sequence. Watch specifically for
+    the 9/8/7 countdown states, which the bridge reports as `belt: "starting"`.
+    Their appearance means the command toggled and started the belt, exactly like
+    the existing toggle. If the belt stays stopped, record that sequence too.
+
+If the belt starts, treat it exactly like an unwanted start from the existing
+toggle: stand clear, let it run or use the panel or remote to stop it. Do not send
+any further `speed` or `stop` command from the bridge to cancel it. That retry
+pattern is already known to produce a countdown-cancel-countdown cycle (§0).
+
+### Decision rule
+
+Use this primitive in place of the toggle behind `Safety.may_stop()` only if Half
+A stops the running belt **and** Half B leaves the stopped belt stopped. If either
+half fails — it does not stop a running belt, or it starts a stopped one — the
+current `Safety.may_stop()` gate stays exactly as it is, unmodified. This
+procedure does not trigger a code change; any replacement requires a separate
+decision after the evidence is recorded. A Half B result counts only if the
+operator confirms that no `repeat_suppressed` line appeared for the specific
+send whose outcome was recorded. Without that confirmation the run is
+inconclusive and must be repeated, not treated as evidence either way.
+
+## 5. Read-only observations for open questions
+
+Nothing in this section moves the belt or writes a motion command. It is safe to
+run with the pad simply sitting there powered on. **Q4, Q5 and Q7 all remain
+OPEN.** An observation here, including "not observed", does not close any of
+them. Only a pattern confirmed across multiple sessions could do that; gathering
+that pattern is future work, not this procedure's job.
+
+### Q4 — OPEN: observe auto mode opportunistically
+
+Mode byte 1 is confirmed as `"manual"`, and byte 2 is confirmed as
+`"standby"`. Byte 0 decodes as `"auto"` but remains unobserved.
+
+21. While running an earlier section, or while leaving the bridge connected and
+    polling, watch the status stream's `mode` field.
+22. If `mode` is ever anything other than `"manual"` or `"standby"`, record the
+    full status line, including `belt`, `speed` and `mode`, and note when it
+    happened. Otherwise record "not observed" for this session.
+
+There is no documented way in this repository to force the pad into auto mode
+from the panel or over BLE. Do not invent one or try undocumented panel button
+combinations to provoke it. This is a passive observation only.
+
+### Q5 — OPEN: capture raw status bytes [15]–[17]
+
+Byte [16] remains undecoded; captures so far contain 0x02, 0x03 and 0x00. Bytes
+[15] and [17] were 0x00 in every capture so far.
+
+The bridge's JSON status stream exposes decoded fields, not these raw bytes.
+`tools/probe-status.py` provides the required raw-frame view. It sends only the
+read-only status query `F7 A2 00 00 A2 FD`, previously confirmed safe when sent
+repeatedly with belt state and speed unchanged, and prints each full frame as
+hex, including bytes [15]–[17].
+
+23. Run `tools/probe-status.py` as a separate, standalone step. Only one BLE
+    connection to the pad exists at a time, so do not run it while
+    `./bin/walkingpad-bridge` is connected. Run it just before connecting the
+    bridge, or after stopping the bridge with Ctrl-C and confirming the
+    disconnection as in §3 step 10.
+24. Capture a raw frame in whatever states the rest of this session reaches
+    naturally: for example, once while awake-and-idle or in standby, and again if
+    the belt happens to be running from an earlier step or a panel start. Stand
+    clear if the belt is already moving. Record bytes [15], [16] and [17] from
+    the raw hex for each capture.
+
+Do not add panel or remote actions solely to reach more states than this session
+already visits.
+
+### Q7 — OPEN: time the untouched sleep boundary
+
+25. After finishing whichever commands from §2–§5 you plan to send, stop sending
+    operator commands and let the bridge keep polling. Note the wall-clock time.
+26. Do not touch the panel or remote during the wait. Record when `link` first
+    reports the pad unreachable as state `"lost"`, or when a subsequent scan
+    reports `"absent"`. That is the sleep boundary for this observation.
+
+AGENTS.md fact 3 already establishes that BLE cannot wake a sleeping pad. This
+observation measures how long the idle, untouched pad remains reachable; it does
+not re-test whether BLE can wake it.
+
+## 6. Deferred to their own session
+
+**Q3 and Q8 remain OPEN.** They are not part of this batch and do not ride along
+with §4 or §5.
+
+### Q3 — OPEN: child-lock interaction with remote commands
+
+Nothing in this repository documents how to engage or disengage child lock on
+this pad model. There is no confirmed button combination or confirmation
+behaviour. Guessing at a trigger risks fumbling with an active belt under an
+unverified control state.
+
+The safety design in §0, AGENTS.md fact 16 and `Safety.may_stop()` directs the
+operator to the panel or remote whenever the bridge refuses to send stop. If
+child lock disables that fallback while the belt is moving, that interaction
+must be understood before combining child lock with a moving belt, not discovered
+by combining them.
+
+Before any such test, establish a documented, confirmed way to engage and
+disengage child lock at will. With the belt stationary, confirm that the panel or
+remote's physical stop control remains available while child lock is engaged
+before ever testing it against a moving belt. That requires its own dedicated
+session; do not add it here.
+
+### Q8 — OPEN: stale status after an abrupt link loss
+
+Settling Q8 requires deliberately reproducing an ungraceful link loss, such as
+SIGKILLing the bridge or otherwise severing the connection abruptly while the
+belt is in a known state. It then requires reconnecting, timing how long the last
+reported status stays frozen, and identifying the event that clears it.
+
+That deliberately causes the failure mode warned against below: "Do not kill the
+bridge with SIGKILL." It also breaks the link-health assumption that a recent
+status frame is the only evidence of a live link. Both `Safety.may_stop()` and
+§4 rely on that assumption. Layering this onto a test of an unverified stop
+primitive would make a frozen readout ambiguous between a stale snapshot and an
+effect of the new primitive.
+
+Q8 needs a dedicated session with a simple, already-stationary belt. That session
+must deliberately break the link, reconnect, time how long the last frame stays
+frozen, and identify what specifically unfreezes it. Do not run it as part of
+this session.
+
 ## Known traps when reading the output
 
+- **`repeat_suppressed` means no frame reached the pad.** The bridge keys this
+  check on command name, not value, so even two different `speed` requests within
+  1.0 second collide. Do not interpret the belt's unchanged state as protocol
+  evidence; wait at least 1.0 second and re-send that single command once.
 - **A stale snapshot can survive an abrupt link loss.** Seen once: after
   notifications stopped mid-session, the next connection served eight identical
   frames reading `belt=01, speed=3.5` while the belt was physically stopped. If

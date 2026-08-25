@@ -242,9 +242,14 @@ it matters most: the belt is about to move and nobody may be ready for it.
   speed alone.
 
 ### Follow-up worth doing
-Test whether `F7 A2 01 00` (set speed 0) stops a running belt. If it does, and if
-it is inert on a stopped belt, it is a strictly safer stop primitive than the
-toggle and should replace it.
+**STILL OPEN AND UNANSWERED.** Test whether `F7 A2 01 00` (set speed 0) stops a
+running belt and is inert on a stopped belt. The operator procedure is
+[Hardware smoke test §4, “Optional open question — can set-speed 0 stop
+safely?”](smoke-test.md#4-optional-open-question--can-set-speed-0-stop-safely).
+No conclusion follows until an operator runs both halves of that hardware
+procedure and records the observed state sequences. Its `repeat_suppressed`
+caveat is a bridge stdout reading hazard caused by command-name suppression, not
+a pad or protocol behaviour and not a new hardware fact.
 
 ### Why STOP is still exempt from repeat-suppression
 - No ACK exists, so a dropped write is invisible, and a second press is the only
