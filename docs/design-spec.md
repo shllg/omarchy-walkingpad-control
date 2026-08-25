@@ -88,9 +88,11 @@ Three components, one process tree, no systemd unit, no root, no compiled binary
 
 `BarPanel` is instantiated **once per screen**. The author's machine has three.
 If the widget spawned the bridge, three bridges would contend for the pad's
-**single** BLE connection slot. The manifest therefore declares
-`kinds: ["service", "bar-widget"]` with `keepLoaded: true`; the shell's service
-loader creates exactly one service object per plugin id. Each widget reaches it
+**single** BLE connection slot. The manifest therefore declares the `service`
+kind through `kinds: ["service", "bar-widget"]`; for every enabled service-kind
+plugin, the shell's service loader creates exactly one service object per plugin
+id. The manifest also sets `keepLoaded: true`, matching the first-party precedent,
+but that flag does not control service mounting. Each widget reaches the service
 through `bar?.shell?.serviceFor("io.github.shllg.walkingpad")` and remains a
 stateless view.
 
@@ -116,16 +118,46 @@ codec with no knowledge of Quickshell.
 ### 4.1 Interface
 
 stdin ← one JSON object per line:
-`{"cmd":"speed","kmh":3.0}` · `{"cmd":"start"}` · `{"cmd":"stop"}` ·
-`{"cmd":"mode","mode":"manual"}` · `{"cmd":"connect","addr":"…"}` · `{"cmd":"disconnect"}`
+`{"cmd":"speed","kmh":3.0}` · `{"cmd":"start"}` · `{"cmd":"stop"}`
+
+That is the complete implemented command vocabulary. Any other `cmd` value is
+silently ignored, including `mode`, `connect` and `disconnect`. This is not an
+error or refusal path: `docs/smoke-test.md` §2 step 4 deliberately sends an
+unknown command and requires no output at all.
+
+- **`mode`:** will not be implemented on current evidence. In `standby` the pad
+  ignores every motion command and the BLE mode-switch opcode; only the panel's
+  **M** button leaves standby (§5.6). The one situation where this command would
+  matter is therefore the situation measured not to work over BLE. §11 Q4 also
+  records `mode == 0` (`auto`) as still unobserved. This command stays out unless
+  hardware evidence later shows the mode-switch opcode producing an observed
+  mode transition outside standby; that question remains unresolved.
+- **`connect`:** absent from the current interface. The bridge presently owns the
+  link end to end: it scans before connecting, connects, treats only a recent
+  status frame as proof of life through its 15 s watchdog, and rescans without a
+  command. However, a targeted `connect <addr>` capability is an **OPEN
+  DEPENDENCY** of §5.4's adoption design. That section stores the address selected
+  by the user, while the bridge has no stdin path for a target address and its
+  discovery only matches advertised FE00, falling back to a `KS-` name prefix.
+  Stage 2 must either implement this capability or design around the gap; it is
+  unresolved, not a decided deletion.
+- **`disconnect`:** absent because graceful release already follows the bridge
+  process lifecycle. SIGTERM is handled through a `GLib.unix_signal_add` source
+  because plain Python signal handlers do not run under the GLib main loop, and
+  `run()` tears the link down in its `finally` block. No stdin command is needed
+  for that release path.
 
 stdout → one JSON object per line:
 ```json
-{"t":"status","belt":"running","speed":2.5,"target":2.5,"mode":"manual",
- "time":1014,"dist_km":0.70,"steps":1321,"ts":1756049000.1}
-{"t":"link","state":"connected","addr":"04:57:…","name":"KS-BLC2"}
-{"t":"error","code":"not_found","msg":"no pad in range"}
+{"t":"status","belt":"running","speed":2.5,"target":2.5,"pad_set_speed":0.0,
+ "mode":"manual","time":1014,"dist_km":0.70,"steps":1321}
+{"t":"link","state":"connected","addr":"<pad-addr>","name":"KS-BLC2"}
+{"t":"error","code":"no_link","msg":"not connected to the pad"}
 ```
+
+`pad_set_speed` is what the pad has stored from the last BLE speed command; it
+reads 0.0 when the speed was most recently set at the panel (AGENTS.md fact 15).
+It is diagnostic only — `target` is the number a UI should render.
 
 Line-delimited JSON is chosen because `Quickshell.Io.SplitParser` consumes it directly.
 
@@ -137,34 +169,54 @@ service never has to poll the bridge.
 
 ### 4.3 Protocol adapter seam
 
-`protocols/wilink.py` implements the verified C2 protocol.
-`protocols/ftms.py` is a stub for standard `0x1826` machines.
-Selection is by service discovery: FE00 → WiLink, 0x1826 → FTMS.
+The implemented bridge is a flat `walkingpad/` package. `frames.py` owns the pure
+WiLink frame codec. `transport.py` owns BLE/D-Bus plumbing and knows nothing of
+WalkingPad semantics. `safety.py` gates motion commands. `bridge.py` orchestrates
+the poll loop and command dispatch.
 
-This exists because the plugin will be installed on models neither the author nor
-any reviewer can test. Untestable code is clearly marked as such; FTMS ships
-disabled behind a flag until someone with the hardware confirms it.
+FTMS, the standard `0x1826` service, is **deferred**. As recorded in
+`docs/plans/2026-08-24-bridge-stage1.md` under "Deferred to later stages", the
+author's C2 has no `0x1826`, so nobody involved can test an FTMS path. Building
+one now would ship untested code claiming support. Per D-1's existing principle,
+untestable code must be clearly marked as such rather than shipped silently.
+
+A future adapter seam remains an option if someone with FTMS-capable hardware can
+test a second protocol implementation. Its shape and module layout are
+unspecified until that hardware exists.
 
 ### 4.4 Standalone testability
 
 The bridge runs without Quickshell:
 ```
-echo '{"cmd":"speed","kmh":2.0}' | walkingpad-bridge --once
 walkingpad-bridge --replay fixtures/c2-fw6.1.2.jsonl    # no hardware needed
 ```
 `--replay` feeds captured frames so the QML layer and CI can run pad-free.
+
+`--once` is deliberately not provided. A one-shot process would contend with the
+long-running bridge for the pad's single BLE connection slot. It would also have
+to scan before connecting, which is slow and often finds nothing because the pad
+normally sleeps and stops advertising entirely. One-off external commands instead
+use §5.1's `IpcHandler` (target `walkingpad`), which exposes `speedUp`, `speedDown`,
+`stop`, `start`, `toggle` and `status`; for example,
+`qs ipc call walkingpad speedUp` uses the existing service and bridge.
 
 ## 5. The QML plugin
 
 ### 5.1 `WalkingpadService.qml` (service entry point)
 
-Declared through `kinds: ["service", "bar-widget"]` with `keepLoaded: true` and
-loaded once per enabled plugin id by the shell's service loader. Widgets retrieve
-it through `bar?.shell?.serviceFor("io.github.shllg.walkingpad")`. It owns the
-`Process`, parses stdout via `SplitParser`, and exposes:
+Declared through `kinds: ["service", "bar-widget"]` and loaded once per enabled
+plugin id by the shell's service loader (§12 D-5). The manifest separately sets
+`keepLoaded: true`, matching the first-party precedent; that flag does not control
+service mounting. Widgets retrieve it through
+`bar?.shell?.serviceFor("io.github.shllg.walkingpad")`. It owns the `Process`,
+parses stdout via `SplitParser`, and exposes:
+
+Optional configuration reaches this service only when a widget forwards its
+injected `settings`, per D-5; forwarded settings never define bridge safety
+limits.
 
 ```
-readonly property string  linkState      // idle | scanning | connecting | connected | error
+readonly property string  linkState      // scanning | connected | absent | unavailable | lost | error
 readonly property string  beltState      // stopped | running | unknown
 readonly property real    currentSpeed   // from frames — ACTUAL
 readonly property real    commandedSpeed // what we last asked for
@@ -211,6 +263,9 @@ split with the bridge.
   notification ("Walking pad ready"). No MAC is ever hardcoded.
 - Matching on the advertised **service UUID** rather than the name is preferred
   because it identifies capability rather than a vendor naming convention.
+
+The stored `address` remains gated on §4.1's open targeted-connect dependency;
+D-5 neither closes that gap nor introduces a state file.
 
 ### 5.5 Theming — the plugin owns no colour
 
@@ -265,7 +320,8 @@ The bridge already emits everything needed per poll: `speed`, `target`, `belt`,
   it renders under a theme that has no accent contrast to spare.
 - Whether daily totals are accumulated locally. The pad's own counters reset, and
   persisting anything means owning a state file, which is a new concern the bridge
-  currently does not have.
+  currently does not have. D-5 defers that file until this question or §5.4 forces
+  it, and records a direct `FileView` mechanism precedent.
 - What the dormant state shows. It is the common case (§2.1) and must read as
   deliberate rather than as a failed connection.
 
@@ -350,8 +406,8 @@ Open questions:
   no goal, because the user is relying on it. That argues for the bridge, which
   owns the poll loop and the only guaranteed clock — but D-1 scopes the bridge to
   protocol, and a goal is policy. Unresolved, and entangled with open question 1
-  (`keepLoaded`). Trigger 1 does not have this problem: a manual taper is short
-  enough to live wherever the session lives.
+  (service lifetime and enablement). Trigger 1 does not have this problem: a
+  manual taper is short enough to live wherever the session lives.
 
 Config sketch, if built: `taperSec` · `taperStep` · `goalUnit` · `dailyResetHour`.
 
@@ -414,6 +470,9 @@ must therefore choose where the service reads configuration and how the widget
 hands changes across; that source is an open design question, not a platform
 facility to assume.
 
+D-5 (§12) resolves that asymmetry and defines the safety boundary of the chosen
+settings channel.
+
 The intended optional values remain:
 `address` · `maxSpeed` (6.0) · `speedStep` (0.5) · `units` (kmh|mph) ·
 `autoConnect` (true) · `notifyOnConnect` (true) · `idleDisconnectSec` (0 = never)
@@ -422,7 +481,7 @@ The intended optional values remain:
 
 | Condition | Behaviour |
 |---|---|
-| Pad not in range | `linkState = idle`, dormant glyph, no retry storm (30 s backoff) |
+| Pad not in range | `linkState = absent`, dormant glyph, no retry storm (30 s backoff) |
 | Connection lost mid-walk | notify, retry 3× with backoff, keep last known stats visible but greyed |
 | Slot held by phone app | surface "in use by another device" — this is the single-connection limit, not a fault |
 | Bridge crashes | service restarts it, max 3× per minute, then reports a hard error |
@@ -464,10 +523,13 @@ submission (`docs/plugin-evidence.md`).
 ## 11. Open questions
 
 1. ✅ **ANSWERED 2026-08-25: the `service` kind supplies the singleton.** Declare
-   `kinds: ["service", "bar-widget"]` with `keepLoaded: true`; the enabled service
-   is mounted once per plugin id whether or not a bar shows the widget, and the
-   widget retrieves it through `bar?.shell?.serviceFor(<id>)`. The first-party
-   media service is the working precedent. Verified in `docs/plugin-evidence.md`.
+   `kinds: ["service", "bar-widget"]`; the service loader mounts the service once
+   per enabled plugin id. A top-level `plugins[]` entry is sufficient enablement
+   under `findEntryLocation()`, independently of any bar widget, and each widget
+   retrieves the service through `bar?.shell?.serviceFor(<id>)`. The manifest also
+   declares `keepLoaded: true`, matching the first-party media service, but that
+   flag is not the mounting mechanism. The first-party media service is the
+   working precedent. Verified in `docs/plugin-evidence.md`.
 2. ✅ **ANSWERED 2026-08-24: yes, START is required.** A speed command on a
    stopped belt updates the pad's stored speed and does not move the belt.
    Verified twice. §5.1 must issue `start` first, then set the speed — and must
@@ -602,3 +664,87 @@ Two corollaries the QML side inherits:
   phantom link above. The bridge handles SIGTERM and SIGINT through GLib signal
   sources and disconnects cleanly; a plain Python signal handler does not run at
   all under a GLib main loop.
+
+### D-5 — Widget forwarding carries preferences, never safety policy (2026-08-25)
+
+**Decision.** Optional user preferences reach the service through the widget's
+injected `settings` property. That channel carries preferences only; it is never
+the source of a safety invariant or required startup state.
+
+**Why forwarding is needed.** Verified against the installed Omarchy shell
+(`4.0.0.alpha`): the bar injects `bar`, `moduleName` and `settings` into matching
+widget properties, both when the item becomes active and when its settings change
+(`/usr/share/omarchy/shell/plugins/bar/Bar.qml:1744-1753`). It also patches a live
+widget's `settings` when `shell.json` changes
+(`/usr/share/omarchy/shell/plugins/bar/Bar.qml:376-386`). The service loader
+injects `omarchyPath`, `shell`, `manifest`, `barWidgetRegistry` and
+`pluginRegistry`, but no `settings`
+(`/usr/share/omarchy/shell/shell.qml:283-313`).
+
+`manifest.json` therefore declares §7's optional `address`, `maxSpeed`,
+`speedStep`, `units`, `autoConnect`, `notifyOnConnect` and `idleDisconnectSec`
+under `barWidget.defaults` and `barWidget.schema`. The working MIT-licensed
+`eduardodallecort.weather-radar` precedent uses those manifest surfaces
+(`~/.config/omarchy/plugins/eduardodallecort.weather-radar/manifest.json:23-49`):
+plain defaults supply the values, while schema objects supply the key, type,
+label, `defaultValue` and description that the settings UI renders. Its widget
+then calls a `syncService()`-style handoff whenever settings change and again when
+the service reference becomes available
+(`~/.config/omarchy/plugins/eduardodallecort.weather-radar/BarWidget.qml:39-45,84-85`).
+Multiple bar instances may repeat the same assignment; they read the same
+`shell.json` entry, so the writes are equivalent.
+
+The service starts with `settings: ({})`, and a widget is created before the bar
+injects its real values. Verified in the same precedent: `setting(name, fallback)`
+uses the fallback only for `undefined` or `null`, while `settingsReady` treats the
+initial empty object as "not known yet," not as a chosen value
+(`~/.config/omarchy/plugins/eduardodallecort.weather-radar/Service.qml:36-53`).
+→ The WalkingPad service must apply the same guard. An empty or not-yet-populated
+object never means that a feature is disabled or that a fallback was selected.
+
+**The safety boundary is load-bearing.** Verified against the installed shell:
+`_syncServices()` mounts every enabled service-kind plugin with a service entry
+point (`/usr/share/omarchy/shell/shell.qml:323-344`). For a third-party plugin,
+`isEnabled()` delegates to `findEntryLocation()`, which considers the selected
+bar, every bar layout and the top-level `plugins[]` array; that array is
+explicitly the enablement path for panels, overlays and services
+(`/usr/share/omarchy/shell/services/PluginRegistry.qml:108-138,206-221`). A
+top-level plugin entry can therefore keep this service polling and holding the
+pad's one BLE connection while zero widgets exist anywhere. In that state no bar
+item exists to receive or forward settings, so a forwarded value is permanently
+absent for the service's entire lifetime, not merely delayed during startup.
+
+`keepLoaded` is not this mechanism: `_syncServices()` does not reference it. Its
+separate use keeps a panel loader active while its window is hidden
+(`/usr/share/omarchy/shell/shell.qml:625`).
+
+→ **Nothing safety-relevant may depend on a forwarded setting.** In particular,
+the forwarded `maxSpeed` and `speedStep` names are not enforcement inputs. They
+must never set, relax or replace the bridge's `max_speed`, `max_step` or
+`stale_after_s`. `Safety.clamp_speed()` owns the per-action and absolute speed
+clamps, while `may_move()` and `may_stop()` own the staleness gate because a
+person may be standing on the belt
+(`walkingpad/safety.py:5-16,21-39,54-56`). The bridge constructs it from
+process-launch flags `--max-speed` and `--max-step`, defaulting to 6.0 and 0.5;
+`stale_after_s` has no flag and retains the class default of 3.0
+(`bin/walkingpad-bridge:11-20`, `walkingpad/safety.py:21-26`). Those limits can
+change only through the bridge's own launch interface, owned by its process
+launcher, never by mapping a value that arrives—or never arrives—over the widget
+channel. A safety limit that can silently fail to arrive is worse than one that
+cannot be changed from the bar at all.
+
+**No state file yet.** The only setting the service could need before any widget
+exists is §5.4's stored pad address. The bridge has no target-address input,
+however; §4.1 keeps that as an **OPEN DEPENDENCY**. Its current discovery by the
+advertised FE00 service, falling back to a `KS-` name prefix, works without a
+stored address. A stored address is meaningless until the bridge has somewhere
+to receive it.
+
+→ Defer a state file until §5.4's adoption design or §5.7's daily-totals design
+actually forces the question. This decision closes neither open question. There
+is a mechanism precedent if one does: the weather-radar service reads a file
+directly with `FileView`, independently of settings injection
+(`~/.config/omarchy/plugins/eduardodallecort.weather-radar/Service.qml:70-90`).
+That example reads shared state owned by the first-party weather widget, not the
+plugin's own private state, so it is a mechanism to study rather than code to
+copy.

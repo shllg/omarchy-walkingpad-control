@@ -78,14 +78,27 @@ the selected bar, a bar layout item or a top-level plugin entry. A matching
 `disabledPlugins[]` entry overrides enablement. Source:
 `/usr/share/omarchy/shell/services/PluginRegistry.qml:110-143`.
 
+Service mounting does not depend on `keepLoaded`. `_syncServices()` mounts every
+enabled service-kind plugin and contains no reference to that flag anywhere in
+its body (`/usr/share/omarchy/shell/shell.qml:323-344`). `keepLoaded`'s only
+observed role is keeping a `panel`-kind plugin's loader active while its window
+is hidden (`/usr/share/omarchy/shell/shell.qml:625`). What actually lets a
+combined `service`+`bar-widget` plugin's service mount with no widget anywhere is
+the top-level `plugins[]` entry named in the paragraph above: `isEnabled()`
+delegates to `findEntryLocation()`, which treats a top-level `plugins[]` entry as
+sufficient on its own, independent of any bar layout entry or bar-widget
+instance; its surrounding comment states that array is the enablement path for
+"panels, overlays and services." Source:
+`/usr/share/omarchy/shell/services/PluginRegistry.qml:108-138,206-221`.
+
 The bar injects a per-widget `settings` object only when the loaded widget exposes
 that property. This happens both for a live inline-settings update and when the
 widget item is loaded. Sources:
 `/usr/share/omarchy/shell/plugins/bar/Bar.qml:362-386,1744-1753`. The service
 loader's injection list has no `settings` property
-(`/usr/share/omarchy/shell/shell.qml:283-313`). Choosing the service's
-configuration source remains an open Stage 2 decision; this evidence does not
-solve it.
+(`/usr/share/omarchy/shell/shell.qml:283-313`). Resolved by D-5 in
+`docs/design-spec.md` §12: widget-forwarded settings carry user preferences only,
+never the bridge's safety clamps.
 
 ## Manifest surface observed
 
