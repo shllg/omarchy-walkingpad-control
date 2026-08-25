@@ -105,7 +105,38 @@ The pad exposes an unauthenticated TI-style firmware update service at
 nothing should.** A bad image bricks the control board. It is named in the source
 only so that nobody later mistakes it for a missing feature.
 
-## Testing
+## Development
+
+    git clone git@github.com:shllg/omarchy-walkingpad.git
+    cd omarchy-walkingpad
+    bin/link-skills
+
+**Run `bin/link-skills` once after cloning.** A fresh clone has no
+`.claude/skills/` or `.codex/skills/` directory and this repository's git hooks
+are inactive until you do — the clone's own checkout cannot bootstrap them.
+
+Those directories are symlink trees pointing at the tracked skill files in
+`.agents/skills/`, and they cannot be committed. This repository *is* the
+installed plugin: `omarchy plugin add` clones it and validates the clone before
+installing, and the validator rejects any plugin that contains a symlink. One
+tracked symlink would make the plugin uninstallable for every user, so the trees
+are gitignored and recreated locally instead.
+
+`bin/link-skills` is idempotent. It creates the links and points
+`core.hooksPath` at `.githooks`, after which the `post-checkout` and `post-merge`
+hooks re-run it, so the links survive branch switches, pulls and merges.
+
+### Checks
+
+    bin/check-repo
+
+Runs what CI runs: no tracked symlink, no import outside the standard library,
+an executable `bin/walkingpad-bridge` with the expected shebang, the manifest
+checks, and the test suite. GitHub Actions runs the same script on every push, so
+a local pass and a green build cannot drift apart. Needs `jq` in addition to the
+test dependency below.
+
+### Tests
 
     python -m pytest tests/ -v
 
@@ -114,14 +145,10 @@ firmware 6.1.2, in `fixtures/`, so the entire suite runs with no hardware presen
 Moving a belt is covered separately by `docs/smoke-test.md`, which requires an
 operator standing clear of the pad.
 
-## Plugin repository
+### Guidance
 
-This repository is the installed plugin: `omarchy plugin add` clones it and
-validates it before installation. The validator rejects a plugin containing any
-symlink, so the runtime skill links are deliberately not committed. The skill
-files live in `.agents/skills/`. Run `bin/link-skills` once after cloning to expose
-them under `.claude/skills/` and `.codex/skills/` and activate this repository's
-git hooks; later checkouts and merges keep the links refreshed automatically.
+`AGENTS.md` is the canonical guidance for anyone — or anything — changing this
+repository. Read it and `docs/design-spec.md` before your first change.
 
 ## Documentation
 
