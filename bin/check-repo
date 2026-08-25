@@ -21,21 +21,51 @@ fi
 echo "check symlinks: PASS"
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "check runtime imports: FAIL — python3 is required" >&2
+  echo "check imports: FAIL — python3 is required" >&2
   exit 1
 fi
 
 if import_failures=$(python3 - <<'PY'
 import ast
-from pathlib import Path
+import subprocess
 import sys
+from pathlib import Path
 
-paths = sorted(Path("walkingpad").rglob("*.py"))
-paths.append(Path("bin/walkingpad-bridge"))
-allowed = set(sys.stdlib_module_names) | {"gi", "walkingpad"}
+# Scan every TRACKED file, not a fixed list of paths. Tracked content is exactly
+# what ships: `omarchy plugin add` clones this repository onto the user's
+# machine. A fixed list is what let tools/ sit here importing bleak until it was
+# untracked in a264590 -- the files were outside the scanned paths, so the gate
+# had nothing to say about them.
+tracked = subprocess.run(
+    ["git", "ls-files", "-z"], capture_output=True, check=True,
+).stdout
+paths = sorted(Path(name.decode()) for name in tracked.split(b"\0") if name)
+
+RUNTIME = set(sys.stdlib_module_names) | {"gi", "walkingpad"}
+# pytest is a dev-only dependency (python-pytest) and never enters the bridge's
+# import path, so tests may use it and nothing else may.
+TESTS = RUNTIME | {"pytest"}
+
+
+def is_python(path):
+    # bin/walkingpad-bridge is the entry point and has no extension, so the
+    # shebang is the only thing that identifies it.
+    if path.suffix == ".py":
+        return True
+    try:
+        with path.open("rb") as handle:
+            first_line = handle.readline(256)
+    except OSError:
+        return False
+    return first_line.startswith(b"#!") and b"python" in first_line
+
+
 failures = []
 
 for path in paths:
+    if not is_python(path):
+        continue
+    allowed = TESTS if path.parts[0] == "tests" else RUNTIME
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError) as error:
@@ -61,9 +91,9 @@ if failures:
     raise SystemExit(1)
 PY
 ); then
-  echo "check runtime imports: PASS"
+  echo "check imports: PASS"
 else
-  echo "check runtime imports: FAIL — a plugin cannot install a dependency; offending imports: $import_failures" >&2
+  echo "check imports: FAIL — a plugin cannot install a dependency and every tracked file ships; offending imports: $import_failures" >&2
   exit 1
 fi
 
