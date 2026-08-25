@@ -214,6 +214,40 @@ of these against the bar icon and popup:
    seconds, and after four kills in a minute to show a hard error rather than
    respawning forever.
 
+## 4d. The live goal — stand clear of the belt
+
+⚠ The goal is the first thing in this bridge that writes a motion command with
+nobody pressing anything. Design spec §6 rule 12 lists the four bounds it rests
+on; this section is where they stop being an argument.
+
+**Preconditions** as §4b: awake, `mode == manual`, phone app closed, belt clear.
+Belt running at a known speed, started per §4b.
+
+**Procedure and what to record.**
+
+1. **It converges.** With the belt steady at 2.0, press `+0.5` once. Expect the
+   panel to show `Goal 2.5` immediately and the belt to reach 2.5 within ~2 s.
+2. **The cap holds.** Press `+0.5` five times as fast as you can. The goal must
+   stop at **actual + 1.0**, not at 4.5. Record the number the panel settles on.
+   This is bound 1 and it is the one replacing "one gesture, one step".
+3. **It reverses.** While the belt is still climbing, press `-0.5` twice. The
+   goal must move down from where it was — one intention, not a queue. Record
+   whether the belt turns around without first finishing the old climb.
+4. **It stops on arrival.** Let it reach the goal. Record whether the bridge goes
+   quiet: the `Goal` row should disappear and no further speed frames should go
+   out. If speed frames keep flowing at a reached goal, that is bound 4 failing
+   and it is the one that would hammer the pad once a second.
+5. **Stop cancels it.** Set a goal 1.0 above actual, then press Stop while it is
+   still converging. The belt must stop and stay stopped. ⚠ If it stops and then
+   moves again, the goal survived a stop — halt the test and report it. That is
+   the single worst failure this feature can have.
+6. **A refused stop is not red.** With the belt stopped, press Stop. The message
+   should appear in the accent colour, not the urgent one, and should be gone
+   when you close and reopen the panel.
+
+**Then re-run §4b once** to confirm the goal has not disturbed the two-part
+start: a goal must never write in the same status frame a start's speed lands.
+
 ## 5. Read-only observations for open questions
 
 Nothing in this section moves the belt or writes a motion command. It is safe to
