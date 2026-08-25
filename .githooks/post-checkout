@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -u
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+if [ -x "$repo_root/bin/link-skills" ]; then
+  "$repo_root/bin/link-skills" >/dev/null 2>&1 || true
+fi
+
+exit 0

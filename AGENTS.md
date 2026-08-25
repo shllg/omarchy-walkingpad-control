@@ -136,3 +136,18 @@ bridge itself does not need it.
 
 Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing
 clear. It also carries the open Q2 cold-start procedure.
+
+## Repository skills
+
+The skills themselves are regular files under `.agents/skills/`, which is the
+only tracked copy. `.claude/skills/` and `.codex/skills/` are symlink trees
+pointing at them so each runtime discovers them where it looks; both are
+gitignored, because a committed symlink would make the plugin uninstallable.
+After cloning, run `bin/link-skills` once to recreate the links and activate this
+repository's git hooks; later checkouts and merges refresh the links automatically.
+
+- `walkingpad-work` — implement changes within the measured safety boundary.
+- `omarchy-plugin` — apply the verified plugin, manifest and loader contract.
+- `walkingpad-review` — review correctness without editing.
+- `walkingpad-security-review` — review the repository-specific threat model.
+- `walkingpad-next` — rank the next useful work by evidence and hardware needs.

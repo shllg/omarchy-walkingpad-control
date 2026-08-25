@@ -7,3 +7,10 @@ docs/local-device.md
 
 # Local-only agent configuration. Never commit.
 AGENTS.local.md
+.claude/settings.local.json
+
+# Runtime symlink trees pointing at .agents/skills/. Never commit: a committed
+# symlink makes the Omarchy plugin validator reject the whole plugin. Recreate
+# them with bin/link-skills.
+.claude/skills/
+.codex/skills/

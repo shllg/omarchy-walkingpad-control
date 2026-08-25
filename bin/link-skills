@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+# Expose the skills in .agents/skills/ to the agent runtimes that look for them
+# under .claude/skills/ and .codex/skills/.
+#
+# WHY THIS IS A SCRIPT AND NOT COMMITTED SYMLINKS
+# -----------------------------------------------
+# This repository is itself the installed plugin: `omarchy plugin add` clones it
+# into the user's plugins directory and validates it there. The validator
+# rejects a plugin outright if it finds any symlink, so the links below must
+# never be committed -- they are gitignored. That makes them absent from a fresh
+# clone, and this script is how you get them back. It is idempotent.
+
+set -euo pipefail
+
+cd "$(dirname "$(readlink -f "$0")")/.."
+
+if [[ ! -d .agents/skills ]]; then
+  echo "link-skills: no .agents/skills directory here" >&2
+  exit 1
+fi
+
+for target in .claude/skills .codex/skills; do
+  mkdir -p "$target"
+done
+
+count=0
+for skill in .agents/skills/*/; do
+  [[ -d $skill ]] || continue
+  name=$(basename "$skill")
+  for target in .claude/skills .codex/skills; do
+    ln -sfn "../../.agents/skills/$name" "$target/$name"
+    echo "linked $target/$name -> ../../.agents/skills/$name"
+    count=$((count + 1))
+  done
+done
+
+echo "link-skills: $count links in place"
+
+# A local core.hooksPath replaces any outer one, so preserve the outer path for
+# this repository's pre-commit hook to call. Read only outer scopes: a later run
+# must never capture the .githooks value this script writes locally.
+outer_hooks_path=$(git config --global --get core.hooksPath 2>/dev/null || true)
+if [[ -z $outer_hooks_path ]]; then
+  outer_hooks_path=$(git config --system --get core.hooksPath 2>/dev/null || true)
+fi
+
+if [[ -n $outer_hooks_path ]]; then
+  case $outer_hooks_path in
+    "~") outer_hooks_path=$HOME ;;
+    "~/"*) outer_hooks_path="$HOME/${outer_hooks_path:2}" ;;
+  esac
+  git config --local hooks.fallbackPath "$outer_hooks_path"
+  echo "link-skills: recorded outer hooks path: $outer_hooks_path"
+else
+  echo "link-skills: no outer hooks path configured"
+fi
+
+git config --local core.hooksPath .githooks
+echo "link-skills: activated repository hooks at .githooks"

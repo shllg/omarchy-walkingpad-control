@@ -114,6 +114,15 @@ firmware 6.1.2, in `fixtures/`, so the entire suite runs with no hardware presen
 Moving a belt is covered separately by `docs/smoke-test.md`, which requires an
 operator standing clear of the pad.
 
+## Plugin repository
+
+This repository is the installed plugin: `omarchy plugin add` clones it and
+validates it before installation. The validator rejects a plugin containing any
+symlink, so the runtime skill links are deliberately not committed. The skill
+files live in `.agents/skills/`. Run `bin/link-skills` once after cloning to expose
+them under `.claude/skills/` and `.codex/skills/` and activate this repository's
+git hooks; later checkouts and merges keep the links refreshed automatically.
+
 ## Documentation
 
 - `docs/design-spec.md` — architecture, safety model, and decision records

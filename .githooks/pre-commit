@@ -1,0 +1,11 @@
+#!/bin/sh
+
+set -u
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || exit 0
+fallback_path=$(git config --local --get hooks.fallbackPath 2>/dev/null) || fallback_path=
+if [ -n "$fallback_path" ] && [ -x "$fallback_path/pre-commit" ]; then
+  exec "$fallback_path/pre-commit" "$@"
+fi
+
+exit 0
