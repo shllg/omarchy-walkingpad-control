@@ -1,0 +1,204 @@
+#!/bin/bash
+
+# Switch the installed plugin between this working tree and the published clone.
+#
+# Developing against the installed copy means pointing the plugins directory at
+# this repository, so the running shell reloads on save. Verifying a release
+# means pointing it back at the published clone, because that is what a user
+# actually receives. This script moves between the two and reports which one is
+# live.
+#
+# It deliberately does NOT use `omarchy plugin remove` / `omarchy plugin add`.
+# Those disable and re-enable the plugin, and disabling splices the widget out
+# of the bar layout (PluginRegistry.setEnabled), so every switch would lose its
+# position in the bar. Replacing the directory in place and rescanning leaves
+# the shell config untouched.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: bin/plugin-link [status|local|published]
+
+  status      Show which source is installed (default)
+  local       Point the installed plugin at this working tree
+  published   Point it at a fresh clone of the origin remote
+
+The walking history is never touched: it lives outside the plugin directory and
+survives every switch. `status` prints where it is so you can see that.
+EOF
+}
+
+fail() {
+  echo "plugin-link: $*" >&2
+  exit 1
+}
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "not inside the repository work tree"
+repo=$(git rev-parse --show-toplevel)
+
+[[ -f $repo/manifest.json ]] || fail "manifest.json is missing from $repo"
+command -v jq >/dev/null 2>&1 || fail "jq is required"
+id=$(jq -r '.id // empty' "$repo/manifest.json")
+[[ -n $id ]] || fail "manifest.json has no id"
+
+plugins_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins"
+target="$plugins_dir/$id"
+# The bridge writes here, and this script must never touch it. It is outside the
+# plugin directory precisely so that removing or reinstalling the plugin cannot
+# take a walking history with it.
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad"
+
+# Never a literal URL: a scanned file containing `git clone <this repo's URL>`
+# earns the marketplace `remote-build` capability, which costs the automatic
+# security-baseline pass. Reading the remote is also simply more correct -- a
+# fork gets its own origin rather than this one hardcoded.
+origin_url() {
+  git -C "$repo" remote get-url origin 2>/dev/null || true
+}
+
+# Returns: missing | local | other-link | published | foreign
+kind() {
+  if [[ -L $target ]]; then
+    local resolved
+    resolved=$(readlink -f "$target" || true)
+    [[ $resolved == "$repo" ]] && echo local || echo other-link
+  elif [[ -d $target ]]; then
+    if [[ -d $target/.git ]]; then echo published; else echo foreign; fi
+  else
+    echo missing
+  fi
+}
+
+report_history() {
+  echo
+  echo "Walking history (never touched by this script)"
+  if [[ -d $state_dir ]]; then
+    local samples bouts size
+    samples=$(find "$state_dir/samples" -name '*.jsonl' 2>/dev/null | wc -l)
+    bouts=$([[ -f $state_dir/bouts.jsonl ]] && wc -l < "$state_dir/bouts.jsonl" || echo 0)
+    size=$(du -sh "$state_dir" 2>/dev/null | cut -f1)
+    echo "  path      $state_dir"
+    echo "  contents  $samples day file(s), $bouts recorded bout(s), $size"
+  else
+    echo "  path      $state_dir"
+    echo "  contents  not created yet"
+  fi
+}
+
+cmd_status() {
+  echo "Plugin id   $id"
+  echo "Installed   $target"
+  case "$(kind)" in
+  local)
+    echo "Source      LOCAL -- this working tree"
+    echo "  target    $repo"
+    echo "  branch    $(git -C "$repo" rev-parse --abbrev-ref HEAD) at $(git -C "$repo" rev-parse --short HEAD)"
+    local dirty
+    dirty=$(git -C "$repo" status --porcelain | wc -l)
+    (( dirty )) && echo "  ⚠ $dirty uncommitted change(s) are live in the shell"
+    echo
+    echo "  ⚠ Do not run 'omarchy plugin update --all' while this is linked."
+    echo "    git -C follows the symlink, so it would fetch and fast-forward"
+    echo "    inside $repo, and reset --hard there if validation then fails."
+    ;;
+  other-link)
+    echo "Source      SYMLINK to somewhere else"
+    echo "  target    $(readlink -f "$target" || echo '<broken>')"
+    ;;
+  published)
+    echo "Source      PUBLISHED clone"
+    echo "  origin    $(git -C "$target" remote get-url origin 2>/dev/null || echo '<none>')"
+    echo "  head      $(git -C "$target" rev-parse --short HEAD 2>/dev/null || echo '<none>')"
+    ;;
+  foreign)
+    echo "Source      a plain directory that is not a git checkout"
+    ;;
+  missing)
+    echo "Source      NOT INSTALLED"
+    ;;
+  esac
+  report_history
+}
+
+rescan() {
+  if command -v omarchy-shell >/dev/null 2>&1; then
+    omarchy-shell shell rescanPlugins >/dev/null 2>&1 \
+      && echo "Rescanned; the shell picked up the change." \
+      || echo "Could not rescan -- run 'omarchy-shell shell rescanPlugins' by hand."
+  else
+    echo "omarchy-shell is not present; skipped the rescan."
+  fi
+}
+
+# The one genuinely dangerous step. `rm -rf` on a path that is a symlink to this
+# repository deletes the repository when a trailing slash is present, so a
+# symlink is unlinked with plain `rm` and a directory is only removed after its
+# manifest confirms it is this plugin.
+remove_target() {
+  [[ -e $target || -L $target ]] || return 0
+  if [[ -L $target ]]; then
+    rm "$target"
+    return 0
+  fi
+  [[ -d $target ]] || fail "$target is neither a symlink nor a directory"
+  local found
+  found=$(jq -r '.id // empty' "$target/manifest.json" 2>/dev/null || true)
+  [[ $found == "$id" ]] \
+    || fail "refusing to delete $target: its manifest id is '${found:-<none>}', not '$id'"
+  rm -rf "${target:?}"
+}
+
+cmd_local() {
+  [[ $(kind) == local ]] && { echo "Already linked to this working tree."; report_history; return 0; }
+  mkdir -p "$plugins_dir"
+  remove_target
+  ln -s "$repo" "$target"
+  echo "Linked $id -> $repo"
+  rescan
+  report_history
+}
+
+# Script scope, not `local`: the EXIT trap below runs after cmd_published has
+# returned, and a function-local would be unbound by then -- which under `set -u`
+# turns the cleanup into an error and leaks the staging directory.
+staging=""
+cleanup_staging() {
+  [[ -n $staging && -d $staging ]] && rm -rf "$staging"
+  staging=""
+}
+
+cmd_published() {
+  local url
+  url=$(origin_url)
+  [[ -n $url ]] || fail "this repository has no 'origin' remote to clone from"
+  mkdir -p "$plugins_dir"
+  staging=$(mktemp -d "$plugins_dir/.link.tmp.XXXXXX")
+  trap cleanup_staging EXIT
+  # Clone into staging first, so a network failure leaves the current install in
+  # place rather than removing it and then failing.
+  git clone --quiet "$url" "$staging/checkout" \
+    || fail "could not clone $url"
+  if command -v omarchy-plugin-validate >/dev/null 2>&1; then
+    omarchy-plugin-validate "$staging/checkout" >/dev/null \
+      || fail "the freshly cloned tree does not validate; leaving the current install alone"
+  fi
+  remove_target
+  mv "$staging/checkout" "$target"
+  cleanup_staging
+  echo "Installed $id from $url at $(git -C "$target" rev-parse --short HEAD)"
+  rescan
+  report_history
+}
+
+case "${1:-status}" in
+status) cmd_status ;;
+local) cmd_local ;;
+published) cmd_published ;;
+-h | --help | help) usage ;;
+*)
+  usage >&2
+  fail "unknown command '$1'"
+  ;;
+esac

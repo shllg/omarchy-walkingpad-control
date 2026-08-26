@@ -184,6 +184,14 @@ surface, not a fault to retry into.
 
 ## Safety
 
+⚠⚠ **The motion controls have not been signed off against hardware.** Everything
+below is implemented, and the logic is tested against protocol frames captured
+from a real pad — including the two-part start, which has its own recording-based
+test. But the start, stop and speed paths have not yet been exercised end to end
+on a moving belt. Until they are, treat anything that moves the belt as beta:
+stand clear when starting, and keep the panel or the remote within reach. The
+read-only side — status, history, the charts — is exercised and safe.
+
 - ⚠ **Stop is NOT unconditional.** The pad's stop opcode is a toggle: it stops a
   running belt and **starts a stopped one**. Stopping is therefore only sent when
   a recent frame shows the belt moving or counting down. Without that evidence the
@@ -248,6 +256,29 @@ recreated locally instead.
 `bin/link-skills` is idempotent. It creates the links and points `core.hooksPath`
 at `.githooks`, after which the `post-checkout` and `post-merge` hooks re-run it,
 so the links survive branch switches, pulls and merges.
+
+### Running your edits in the real bar
+
+    bin/plugin-link            # which source is installed?
+    bin/plugin-link local      # point the bar at this working tree
+    bin/plugin-link published  # point it back at a fresh clone of origin
+
+Linked to `local`, the running shell reloads on save, so QML edits appear in the
+bar immediately. Switch to `published` before verifying a release, because that
+is what a user actually receives.
+
+The switch replaces the plugin directory and rescans, rather than going through
+`omarchy plugin remove` / `add`. Disabling a plugin splices its widget out of the
+bar layout, so the round trip would otherwise lose its position in the bar every
+time. **The walking history is never touched** — it lives outside the plugin
+directory, and `bin/plugin-link` prints where it is on every run so you can see
+that it survived.
+
+⚠ **Do not run `omarchy plugin update --all` while `local` is linked.**
+`omarchy-plugin-update` calls `git -C` on the plugin directory, and `git -C`
+follows the symlink: it would fetch and fast-forward inside *this repository*,
+and `reset --hard ORIG_HEAD` here if validation then failed. `bin/plugin-link
+status` repeats this warning whenever the local tree is live.
 
 ### Checks
 
