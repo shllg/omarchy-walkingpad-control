@@ -38,6 +38,32 @@ def default_store_dir():
     return os.path.join(state_home, "walkingpad")
 
 
+# Charts §2.4's ladder, and the cap that selects a rung from it. Deterministic on
+# purpose: a "pretty" rung chosen from the data would move the axis under someone
+# comparing two days. Every rung is a whole multiple of the one below it, which is
+# what makes coarsening a 60 s pass into any of them exact rather than approximate.
+BUCKET_LADDER_S = (60, 300, 900, 3600, 21600, 86400, 604800)
+MAX_PROFILE_BUCKETS = 120
+PROFILE_BASE_BUCKET_S = 60
+
+# Buckets are aligned to the Unix epoch: floor(t / bucket_s) * bucket_s. Civil
+# offsets are whole minutes, so every rung up to an hour lands on a local
+# wall-clock minute or hour; the day and week rungs are consequently UTC-aligned,
+# and only spans long enough to need them are affected. WalkingpadModel.js repeats
+# this convention for the popup's 60 one-minute buckets (charts §6) and the two
+# copies must keep agreeing at a boundary.
+
+# The bridge polls once a second while the belt moves and every two seconds while
+# it is idle (bridge.py POLL_INTERVAL_S / IDLE_POLL_INTERVAL_S), and
+# Safety.stale_after_s is 3.0 s. A wider separation between adjacent samples is a
+# hole in the record rather than an interval anything observed. Mirrored here
+# instead of imported, exactly as store.py mirrors the same cadence: this reader
+# must stay startable without the bridge's own modules.
+MAX_SAMPLE_INTERVAL_S = 3.0
+
+SECONDS_PER_DAY = 86400.0
+
+
 def finite_nonnegative_float(value):
     try:
         number = float(value)
@@ -49,6 +75,22 @@ def finite_nonnegative_float(value):
     if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError("must be finite and greater than or equal to 0")
     return number
+
+
+def bucket_argument(value):
+    if value == "auto":
+        # None means "apply charts §2.4's ladder here", and bucket_s in the
+        # result reports what that chose.
+        return None
+    try:
+        seconds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be 'auto' or a whole number of seconds") from exc
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            "must be 'auto' or a whole number of seconds greater than 0")
+    return seconds
 
 
 def build_parser():
@@ -73,6 +115,19 @@ def build_parser():
     totals.add_argument("--since")
     totals.add_argument("--until")
     totals.add_argument("--store", default=default_store_dir())
+
+    profile = commands.add_parser("profile", add_help=False)
+    profile.add_argument("--since")
+    profile.add_argument("--until")
+    profile.add_argument("--bucket", type=bucket_argument, default=None)
+    # Accepted so the analysis window can forward one uniform set of arguments to
+    # every history query. It deliberately changes nothing here: a profile
+    # aggregates bouts and samples, and neither totals nor buckets depend on
+    # where §1.3's session boundaries fall. Rejecting it instead is the mistake
+    # `totals` already caused once -- argparse answered with an error object
+    # where the window expected data.
+    profile.add_argument("--gap", type=finite_nonnegative_float, default=5.0)
+    profile.add_argument("--store", default=default_store_dir())
 
     residuals = commands.add_parser("residuals", add_help=False)
     residuals.add_argument("--store", default=default_store_dir())
@@ -125,14 +180,20 @@ def validate_sample(sample):
     require_type(sample["pe"], int, "sample.pe")
 
 
-def read_jsonl(path, validator):
+def iter_jsonl(path, validator, skipped_rows):
+    """Yield validated rows one at a time, counting unreadable ones.
+
+    Streaming is what lets `profile` cross a whole period of sample files without
+    holding them: a year of walking is over a million rows, and charts §4 puts
+    that work here precisely so neither the bridge nor the UI thread carries it.
+    `skipped_rows` is a one-element list because a generator's return value is
+    not reachable from an ordinary `for`.
+    """
     try:
         stream = open(path, "r", encoding="utf-8")
     except FileNotFoundError:
-        return [], 0
+        return
 
-    rows = []
-    skipped_rows = 0
     with stream:
         for line in stream:
             try:
@@ -143,10 +204,15 @@ def read_jsonl(path, validator):
                 # future-schema, hand-edited or wrong-shaped row must therefore
                 # cost only itself, not every later query; count it so "empty"
                 # remains distinguishable from "all rows unreadable".
-                skipped_rows += 1
+                skipped_rows[0] += 1
                 continue
-            rows.append(row)
-    return rows, skipped_rows
+            yield row
+
+
+def read_jsonl(path, validator):
+    skipped_rows = [0]
+    rows = list(iter_jsonl(path, validator, skipped_rows))
+    return rows, skipped_rows[0]
 
 
 def read_bouts(store_dir):
@@ -334,6 +400,253 @@ def query_totals(args):
             "skipped_rows": skipped_rows}
 
 
+def finite(value):
+    # validate_sample only proves a field is a number, and json.loads accepts the
+    # Infinity and NaN tokens. Every value that reaches an aggregate is checked
+    # here so emit()'s allow_nan=False can never turn one hand-edited row into a
+    # failed query for the whole period.
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def bucket_start(timestamp, bucket_s):
+    return math.floor(timestamp / bucket_s) * bucket_s
+
+
+def new_profile_bucket():
+    return {"steps": 0, "dist_km": 0.0, "dur_s": 0, "v_sum": 0.0, "v_n": 0}
+
+
+def sample_files_in_range(store_dir, since, until):
+    directory = os.path.join(store_dir, "samples")
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        # An absent or unreadable samples directory is the ordinary empty-store
+        # result, exactly like a missing bouts.jsonl.
+        return []
+
+    files = []
+    for name in names:
+        if not name.endswith(".jsonl"):
+            continue
+        try:
+            # store.py names each file for the UTC date of the frames inside it.
+            day = datetime.strptime(name[:-len(".jsonl")], "%Y-%m-%d")
+        except ValueError:
+            continue
+        day_start = day.replace(tzinfo=timezone.utc).timestamp()
+        day_end = day_start + SECONDS_PER_DAY
+        if since is not None and day_end <= since:
+            continue
+        if until is not None and day_start > until:
+            continue
+        files.append((day_start, os.path.join(directory, name)))
+    files.sort()
+    return [path for _, path in files]
+
+
+def accumulate_interval(previous, sample, bucket, histogram):
+    if previous is None:
+        return
+    if previous["e"] != sample["e"]:
+        # Stage 3 §1.3 defines an epoch as a maximal non-decreasing counter span.
+        # A delta across that boundary would join two unrelated coordinate systems.
+        return
+
+    elapsed = sample["t"] - previous["t"]
+    if not finite(elapsed) or not (0 < elapsed <= MAX_SAMPLE_INTERVAL_S):
+        # Wider than the poll cadence is a hole. Stage 3 §2.3 has no evidence for
+        # what happened inside it, and the totals below disclose that share
+        # separately; charging the whole counter jump to the bucket where the
+        # record resumed would invent a placement nothing measured.
+        return
+
+    steps = sample["s"] - previous["s"]
+    dist_km = sample["d"] - previous["d"]
+    dur_s = sample["pe"] - previous["pe"]
+    if not (finite(steps) and finite(dist_km) and finite(dur_s)):
+        return
+    # Inside one epoch these counters only rise. A decrease is a malformed row
+    # pair, and subtracting it would silently eat real walking from the bucket.
+    if steps < 0 or dist_km < 0 or dur_s < 0:
+        return
+
+    bucket["steps"] += steps
+    bucket["dist_km"] += dist_km
+    bucket["dur_s"] += dur_s
+
+    if dur_s > 0 and finite(previous["v"]):
+        # `pe` counts RUNNING seconds (Stage 3 §1.1), so its delta is time the
+        # belt actually moved -- at the speed the EARLIER frame reported, which
+        # is the speed that was in effect across the interval.
+        speed = round(previous["v"], 1)
+        histogram[speed] = histogram.get(speed, 0) + dur_s
+
+
+def accumulate_samples(store_dir, since, until, base_bucket_s):
+    buckets = {}
+    histogram = {}
+    first_t = None
+    last_t = None
+    skipped_rows = [0]
+    previous = None
+
+    for path in sample_files_in_range(store_dir, since, until):
+        for sample in iter_jsonl(path, validate_sample, skipped_rows):
+            timestamp = sample["t"]
+            if not finite(timestamp):
+                skipped_rows[0] += 1
+                continue
+            if since is not None and timestamp < since:
+                continue
+            if until is not None and timestamp > until:
+                continue
+
+            first_t = timestamp if first_t is None else min(first_t, timestamp)
+            last_t = timestamp if last_t is None else max(last_t, timestamp)
+
+            key = bucket_start(timestamp, base_bucket_s)
+            bucket = buckets.get(key)
+            if bucket is None:
+                # A bucket exists as soon as a sample lands in it, even one that
+                # carries no counter delta. Charts §4 omits buckets with NO
+                # samples, so this is what keeps a measured zero -- the belt was
+                # recorded here and did not advance -- distinct from no data.
+                bucket = new_profile_bucket()
+                buckets[key] = bucket
+
+            if sample["b"] == "running" and finite(sample["v"]):
+                # Fact 8: only "running" means the belt moved, so only those
+                # frames may contribute a speed. That is the same rule store.py
+                # applies to a bout's v_avg, and for the same reason -- fact 2
+                # makes the near-zero speeds around a stop real but irrelevant.
+                bucket["v_sum"] += sample["v"]
+                bucket["v_n"] += 1
+
+            accumulate_interval(previous, sample, bucket, histogram)
+            previous = sample
+
+    return buckets, histogram, first_t, last_t, skipped_rows[0]
+
+
+def coarsen_buckets(base_buckets, base_bucket_s, bucket_s):
+    if bucket_s == base_bucket_s:
+        return base_buckets
+
+    # Exact rather than approximate, because every ladder rung is a whole
+    # multiple of PROFILE_BASE_BUCKET_S and of every rung below it.
+    merged = {}
+    for key, bucket in base_buckets.items():
+        target = bucket_start(key, bucket_s)
+        into = merged.get(target)
+        if into is None:
+            into = new_profile_bucket()
+            merged[target] = into
+        for field in ("steps", "dist_km", "dur_s", "v_sum", "v_n"):
+            into[field] += bucket[field]
+    return merged
+
+
+def choose_bucket_s(start, end):
+    for rung in BUCKET_LADDER_S:
+        count = math.floor(end / rung) - math.floor(start / rung) + 1
+        if count <= MAX_PROFILE_BUCKETS:
+            return rung
+    return BUCKET_LADDER_S[-1]
+
+
+def profile_extent(bouts, first_sample, last_sample):
+    # Charts §2.4: the axis spans the data's real extent, first activity to last,
+    # not the calendar span of the period. Bouts are included alongside samples
+    # because a wholly unobserved bout has exact totals and no samples at all
+    # (Stage 3 §2.3); leaving it out would put a session in the rail that sits
+    # outside the axis of the chart beside it.
+    spans = []
+    for bout in bouts:
+        if finite(bout["start"]) and finite(bout["end"]):
+            spans.append((bout["start"], bout["end"]))
+    if first_sample is not None:
+        spans.append((first_sample, last_sample))
+    if not spans:
+        return None, None
+
+    start = min(span[0] for span in spans)
+    end = max(max(span[1] for span in spans), start)
+    return start, end
+
+
+def profile_totals(bouts):
+    if not bouts:
+        return {
+            "dur_s": 0,
+            "dist_km": 0.0,
+            "steps": 0,
+            "v_avg": None,
+            "unobserved_s": 0,
+            "unobserved_dist_km": 0.0,
+            "unobserved_steps": 0,
+        }
+    summary = summarize_bouts(bouts)
+    return {
+        field: summary[field]
+        for field in ("dur_s", "dist_km", "steps", "v_avg",
+                      "unobserved_s", "unobserved_dist_km", "unobserved_steps")
+    }
+
+
+def query_profile(args):
+    bouts, skipped_bouts = read_bouts(args.store)
+    bouts = filter_bouts(bouts, args.since, args.until)
+    since = parse_iso(args.since)
+    until = parse_iso(args.until)
+
+    # An explicit bucket is accumulated directly; `auto` needs the data's extent
+    # before it can pick a rung, so it accumulates at the ladder's finest rung
+    # and coarsens afterwards. Either way the samples are read exactly once.
+    base_bucket_s = (args.bucket if args.bucket is not None
+                     else PROFILE_BASE_BUCKET_S)
+    base_buckets, histogram, first_sample, last_sample, skipped_samples = (
+        accumulate_samples(args.store, since, until, base_bucket_s))
+
+    start, end = profile_extent(bouts, first_sample, last_sample)
+    if args.bucket is not None:
+        bucket_s = args.bucket
+    elif start is None:
+        bucket_s = BUCKET_LADDER_S[0]
+    else:
+        bucket_s = choose_bucket_s(start, end)
+
+    buckets = coarsen_buckets(base_buckets, base_bucket_s, bucket_s)
+    rows = []
+    for key in sorted(buckets):
+        bucket = buckets[key]
+        rows.append({
+            "t": key,
+            "steps": bucket["steps"],
+            "dist_km": round(bucket["dist_km"], 2),
+            "dur_s": bucket["dur_s"],
+            # Null, not zero: a bucket whose frames never reported "running" has
+            # no measured speed, and drawing one at 0 km/h would assert the belt
+            # was observed standing still there.
+            "v_avg": (round(bucket["v_sum"] / bucket["v_n"], 1)
+                      if bucket["v_n"] else None),
+        })
+
+    return {
+        "bucket_s": bucket_s,
+        "start": start,
+        "end": end,
+        "buckets": rows,
+        "speed_histogram": [
+            {"kmh": speed, "dur_s": dur_s}
+            for speed, dur_s in sorted(histogram.items())
+            if dur_s > 0
+        ],
+        "totals": profile_totals(bouts),
+        "skipped_rows": skipped_bouts + skipped_samples,
+    }
+
+
 def zero_residuals(state_status):
     return {
         "state_status": state_status,
@@ -406,6 +719,8 @@ def dispatch(args):
         return query_session(args)
     if args.command == "totals":
         return query_totals(args)
+    if args.command == "profile":
+        return query_profile(args)
     return query_residuals(args)
 
 

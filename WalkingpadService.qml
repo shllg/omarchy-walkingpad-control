@@ -36,11 +36,17 @@ Item {
   readonly property real distanceKm: state.distanceKm
   readonly property int steps: state.steps
   readonly property var samples: state.samples
-  // Stage 3 §7 and ADR D-5 make this a read-time presentation preference:
-  // the popup forwards it when settings exist, while this working default keeps
+  // Stage 3 §7 and ADR D-5 make this a read-time presentation preference: the
+  // popup forwards it when settings exist, while this working default keeps
   // grouping defined when no widget exists. It is never sent to the bridge.
+  //
+  // Only the ANALYSIS WINDOW consumes it now. The popup used to slice this
+  // buffer into "the current session" for its chart; charts §1 replaced that
+  // with 60 fixed wall-clock minutes over the last hour, because a gap is the
+  // information there and a session tail begins after the last gap by
+  // definition. So the slice is gone rather than left computing at 1 Hz for a
+  // property nothing reads.
   property real gapMinutes: 5
-  readonly property var sessionSamples: root.computeSessionSamples()
   readonly property string lastErrorCode: state.lastErrorCode
   readonly property string lastErrorMessage: state.lastErrorMessage
 
@@ -80,21 +86,6 @@ Item {
   readonly property bool ramping: state.hasStatus
     && root.targetSpeed !== null
     && Math.abs(state.currentSpeed - Number(root.targetSpeed)) >= root.rampDeadband
-
-  function computeSessionSamples() {
-    var samples = state.samples
-    var gapSeconds = root.gapMinutes * 60
-    for (var i = samples.length - 1; i > 0; --i) {
-      // Stage 3 §1.3 merges only separations strictly LESS than the gap, so
-      // equality splits. The Python query and this JS reader deliberately apply
-      // §7 independently; their duplicated boundary must therefore agree exactly.
-      if (samples[i].t - samples[i - 1].t >= gapSeconds)
-        return samples.slice(i)
-    }
-    // An empty buffer is the pad's normal resting state (fact 3), and falls
-    // through here exactly like any other buffer containing no session gap.
-    return samples
-  }
 
   // -- commands -------------------------------------------------------------
 

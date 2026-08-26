@@ -52,11 +52,26 @@ Panel {
     && !Model.isAdvisory(service.lastErrorCode)
 
   property int cursorIndex: -1
-  // The action row and chart address different collections. Keeping their
-  // cursors separate prevents a hovered sample from becoming a button index;
+  // The control row and chart address different collections. Keeping their
+  // cursors separate prevents a hovered bucket from becoming a button index;
   // the zone says which one the keyboard owns without conflating those indices.
   property int chartCursorIndex: -1
-  property string cursorZone: "actions"
+  // Charts §5: three zones, laid out the way they appear -- chart on top, then
+  // the Stats action in the CONTROL header, then the control row.
+  property string cursorZone: "controls"
+
+  // The wall clock the chart's 60 fixed one-minute buckets are anchored to. It
+  // has to advance on its own: while the pad is idle no samples arrive at all
+  // (fact 3), and the axis must still scroll off the minute that just ended.
+  property real nowSeconds: 0
+
+  // Charts §1: the popup performs NO file I/O. This is derived from the service's
+  // in-memory ring buffer alone, and only while the panel is open.
+  readonly property var stepChart: root.opened && root.service
+    ? Model.stepBuckets(root.service.samples, root.nowSeconds)
+    : ({ buckets: [], rangeStart: 0, rangeEnd: 60, partialBucketStart: NaN })
+
+  readonly property var chartBuckets: root.stepChart.buckets
 
   // The Set editor is disclosed rather than permanent. A text field living in a
   // bar popup holds focus away from the panel's key catcher for as long as it
@@ -88,13 +103,16 @@ Panel {
       + " applies as " + Model.speedText(service.clampGoalAbsolute(root.editorTyped))
   }
 
+  // Charts §0.4: every one of these acts on the TREADMILL. Stats navigates, so
+  // it is not a sixth cell here -- adding it shrank each real control from about
+  // 63 px to 52 px against 55 px of content, in a component with neither elide
+  // nor clip. The width was the symptom; the category error was the cause.
   readonly property var actions: [
     { key: "start", label: "Start", icon: Model.ICON_START },
     { key: "stop", label: "Stop", icon: Model.ICON_STOP },
     { key: "down", label: "-" + root.speedStep.toFixed(1), icon: Model.ICON_MINUS },
     { key: "up", label: "+" + root.speedStep.toFixed(1), icon: Model.ICON_PLUS },
-    { key: "set", label: "Set", icon: Model.ICON_SET },
-    { key: "analysis", label: "Stats", icon: Model.ICON_STATS }
+    { key: "set", label: "Set", icon: Model.ICON_SET }
   ]
 
   function openEditor() {
@@ -158,10 +176,14 @@ Panel {
   }
 
   function activateCursor() {
-    // A chart point has nothing to activate. Falling through here would turn
-    // Enter while reading the chart into whichever belt command the retained
-    // action cursor names, which is precisely why the zone must gate dispatch.
-    if (root.cursorZone !== "actions") return
+    // Charts §5: this gate is SAFETY-relevant and must not be relaxed. Enter can
+    // reach a belt command only from the control zone. The chart zone has
+    // nothing to activate at all, and the stats zone's one action navigates
+    // rather than moving the belt; falling through from either would turn Enter
+    // while reading the chart into whichever command the retained control cursor
+    // happens to name.
+    if (root.cursorZone === "stats") { root.invoke("analysis"); return }
+    if (root.cursorZone !== "controls") return
     if (cursorIndex < 0 || cursorIndex >= actions.length) return
     invoke(actions[cursorIndex].key)
   }
@@ -173,34 +195,51 @@ Panel {
   }
 
   function moveChartCursor(delta) {
-    var count = root.service ? root.service.sessionSamples.length : 0
+    var count = root.chartBuckets.length
     if (count === 0) { chartCursorIndex = -1; return }
     var next = chartCursorIndex + delta
     chartCursorIndex = Math.max(0, Math.min(count - 1, next))
   }
 
+  function enterChartZone() {
+    // Fact 3 makes an empty chart the normal resting state, not an error, so
+    // charts §5 leaves the zone unreachable rather than presenting a keyboard
+    // cursor with nowhere to go. The newest bucket is the useful first reading.
+    var count = root.chartBuckets.length
+    if (count === 0) return false
+    root.cursorZone = "chart"
+    root.chartCursorIndex = count - 1
+    return true
+  }
+
   function handleMove(dx, dy) {
-    // Plan §5 gives the axes different meanings: vertical changes zones and
-    // horizontal scrubs within one. There is deliberately no vertical wrap,
+    // Charts §5 gives the axes different meanings: vertical changes zones and
+    // horizontal moves within one. There is deliberately no vertical wrap,
     // because leaving the chart must be an explicit move back toward controls.
     if (dy !== 0) {
-      if (dy < 0 && cursorZone === "actions") {
-        // Fact 3 makes an empty chart the normal resting state, not an error.
-        // Refusing that zone avoids presenting a keyboard cursor with nowhere
-        // to go; when data exists, its live end is the useful first reading.
-        var count = root.service ? root.service.sessionSamples.length : 0
-        if (count === 0) return
-        cursorZone = "chart"
-        chartCursorIndex = count - 1
-      } else if (dy > 0 && cursorZone === "chart") {
-        cursorZone = "actions"
-        chartCursorIndex = -1
+      if (dy < 0) {
+        if (cursorZone === "controls") cursorZone = "stats"
+        else if (cursorZone === "stats") root.enterChartZone()
+      } else {
+        if (cursorZone === "chart") {
+          cursorZone = "stats"
+          // Leaving the chart clears its cursor (charts §5), so a later return
+          // to the zone starts at the live end rather than a stale minute.
+          chartCursorIndex = -1
+        } else if (cursorZone === "stats") {
+          cursorZone = "controls"
+        }
       }
       return
     }
     if (dx === 0) return
-    if (cursorZone === "actions") root.moveCursor(dx)
+    // The stats zone holds one action, so horizontal movement has nothing to do.
+    if (cursorZone === "controls") root.moveCursor(dx)
     else if (cursorZone === "chart") root.moveChartCursor(dx)
+  }
+
+  function clockText(seconds) {
+    return Qt.formatTime(new Date(seconds * 1000), "HH:mm")
   }
 
   // Spec §7 and D-5: this forwarding channel carries preferences only.
@@ -223,7 +262,10 @@ Panel {
   onOpenedChanged: {
     cursorIndex = -1
     chartCursorIndex = -1
-    root.cursorZone = "actions"
+    root.cursorZone = "controls"
+    // Seeded before the first frame so the chart never opens on a stale minute
+    // from the last time the panel was up.
+    if (root.opened) root.nowSeconds = Date.now() / 1000
     // Assigned directly rather than via closeEditor(), which hands focus back
     // to the key catcher -- not something to do to a panel on its way out.
     root.editing = false
@@ -237,6 +279,17 @@ Panel {
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  // Only while the panel is open, and deliberately not at 1 Hz: the bar for the
+  // current minute already refreshes whenever a sample arrives, because the
+  // bucket binding depends on the ring buffer. This timer exists solely so the
+  // axis still rolls over on an idle pad, where no sample ever arrives.
+  Timer {
+    running: root.opened
+    interval: 5000
+    repeat: true
+    onTriggered: root.nowSeconds = Date.now() / 1000
+  }
 
   IpcHandler {
     target: "walkingpad"
@@ -425,43 +478,80 @@ Panel {
           wrapMode: Text.WordWrap
         }
 
-        // Samples continue changing while the popup is closed. Unloading the
-        // chart removes every Canvas then, so invisible 1 Hz updates cannot
-        // repaint the background, four data rows and cursor overlay.
+        // ---------- Steps per minute, on a real wall-clock axis ----------
+        // Charts §1: one chart, and the one thing the numbers below cannot say.
+        // Cumulative distance and steps were removed because they only ever rise
+        // and each terminated at a figure printed in text beside it.
+        //
+        // Samples keep changing while the popup is closed, so the chart is
+        // unloaded then: nothing recomputes buckets for a panel nobody is
+        // looking at.
         Loader {
           id: chartLoader
           width: parent.width
           active: root.opened
 
           sourceComponent: Component {
-            WalkingpadChartStack {
+            Column {
               width: chartLoader.width
-              samples: root.service ? root.service.sessionSamples : []
-              rows: ["speed", "cadence", "distance", "steps"]
-              // Stage 3 §5 calls for compact, roughly 24 px rows here. Passing
-              // every Canvas dimension through Style preserves those proportions
-              // while honouring Omarchy's live spacing and font scales.
-              implicitWidth: Style.space(240)
-              rowHeight: Style.space(24)
-              rowSpacing: Style.space(4)
-              axisHeight: Style.space(14)
-              fg: root.bar.foreground
-              accent: Color.accent
-              muted: Qt.darker(root.bar.foreground, 1.4)
-              fontFamily: root.bar.fontFamily
-              labelFontSize: Style.font.caption
-              lineWidth: Style.space(1)
-              dashLength: Style.space(4)
-              dashSpacing: Style.space(3)
-              cursorIndex: root.chartCursorIndex
-              interactive: true
-              // Pointer and keyboard share the same cursor owner. A valid hover
-              // enters the chart zone so the next arrow continues at that sample;
-              // -1 is the chart's empty-data sentinel and cannot focus the zone.
-              onCursorMoved: function(index) {
-                if (index < 0) return
-                root.cursorZone = "chart"
-                root.chartCursorIndex = index
+              spacing: Style.spacing.labelGap
+
+              WalkingpadBarChart {
+                id: stepChart
+                width: parent.width
+                buckets: root.chartBuckets
+                bucketSeconds: 60
+                // The axis is ALWAYS the last hour, matching the ring buffer's
+                // own bound, so a minute with no walking is visibly absent
+                // rather than compressed away by a sample-index axis.
+                rangeStart: root.stepChart.rangeStart
+                rangeEnd: root.stepChart.rangeEnd
+                partialBucketStart: root.stepChart.partialBucketStart
+
+                fg: root.bar.foreground
+                accent: Color.accent
+                muted: Qt.darker(root.bar.foreground, 1.4)
+
+                // Every dimension enters through Style, so the compact popup
+                // proportions survive Omarchy's live spacing and font scales
+                // without this component importing either palette.
+                plotHeight: Style.space(46)
+                axisHeight: Style.space(14)
+                barSpacing: Style.space(1)
+                maxBarWidth: Style.space(10)
+                cornerRadius: Style.cornerRadius
+                lineWidth: Style.space(1)
+                fontFamily: root.bar.fontFamily
+                labelFontSize: Style.font.caption
+                valueUnit: "steps"
+
+                axisStartLabel: root.clockText(root.stepChart.rangeStart)
+                axisEndLabel: "now"
+
+                cursorIndex: root.chartCursorIndex
+                interactive: true
+                // Pointer and keyboard share the same cursor owner. A valid
+                // hover enters the chart zone so the next arrow continues at
+                // that bucket; -1 is the empty sentinel and cannot focus it.
+                onCursorMoved: function(index) {
+                  if (index < 0) return
+                  root.cursorZone = "chart"
+                  root.chartCursorIndex = index
+                }
+              }
+
+              Text {
+                width: parent.width
+                readonly property var bucket:
+                  root.chartCursorIndex >= 0
+                    && root.chartCursorIndex < root.chartBuckets.length
+                    ? root.chartBuckets[root.chartCursorIndex] : null
+                visible: bucket !== null
+                text: bucket === null ? "" : root.clockText(bucket.t)
+                  + "  ·  " + Math.round(bucket.value) + " steps"
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
           }
@@ -504,10 +594,43 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
-          PanelSectionHeader {
-            text: "CONTROL"
-            foreground: root.bar.foreground
-            fontFamily: root.bar.fontFamily
+          // Charts §5: Stats sits at the right-hand end of the section header,
+          // where a secondary NAVIGATION action belongs. That is what returns
+          // the control row below to five buttons at their original width.
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(controlHeader.implicitHeight,
+                                     statsAction.implicitHeight)
+
+            PanelSectionHeader {
+              id: controlHeader
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "CONTROL"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Button {
+              id: statsAction
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: Model.ICON_STATS
+              iconSize: Style.font.bodySmall
+              text: "Stats"
+              fontSize: Style.font.caption
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.xxs
+              hasCursor: root.cursorZone === "stats"
+              onClicked: root.invoke("analysis")
+              onHovered: function(h) {
+                if (!h) return
+                root.cursorZone = "stats"
+                root.chartCursorIndex = -1
+              }
+            }
           }
 
           // ---------- Set a speed by hand ----------
@@ -620,13 +743,13 @@ Panel {
                 bordered: true
                 // Fact 8: only "running" means the belt is moving.
                 active: modelData.key === "stop" && root.beltState === "running"
-                hasCursor: root.cursorZone === "actions" && root.cursorIndex === index
+                hasCursor: root.cursorZone === "controls" && root.cursorIndex === index
                 onClicked: root.invoke(modelData.key)
                 onHovered: function(h) {
                   if (!h) return
                   // Pointer and keyboard share one cursor owner. Handing it to the
                   // zone last addressed makes the next arrow continue from there.
-                  root.cursorZone = "actions"
+                  root.cursorZone = "controls"
                   root.cursorIndex = index
                   root.chartCursorIndex = -1
                 }

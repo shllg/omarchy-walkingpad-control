@@ -427,19 +427,27 @@ single BLE connection).
 
 ### 5.7 Stats, session charts and the analysis window
 
-**DESIGNED 2026-08-26 — see `docs/plans/2026-08-26-stats-and-analysis.md` (Stage 3).**
-That document is authoritative for the store, the attribution model, the chart
-component and the overlay window. This section records only what it resolved.
+**DESIGNED 2026-08-26 — see `docs/plans/2026-08-26-stats-and-analysis.md` (Stage 3),
+whose §4, §5.2 and §6.3 are in turn superseded by
+`docs/plans/2026-08-26-charts-redesign.md` (Stage 3.1) after review of the shipped
+UI on hardware.** Those documents are authoritative for the store, the attribution
+model, the chart components and the overlay window. This section records only what
+they resolved.
 
 All four open questions this section held are answered there:
 
 - **Which figures the bar shows.** The popup keeps its existing Distance/Steps/Time
-  pairs and gains a compact four-row chart stack; the bar strip itself is unchanged.
+  pairs and carries ONE chart — steps per minute on a real wall-clock axis; the bar
+  strip itself is unchanged. Cumulative distance and steps were dropped as chart
+  rows in Stage 3.1, because they only ever rise and each terminated at a figure
+  printed in text beside it.
 - **Whether a sparkline is worth it, and how it renders with no accent contrast.**
-  Yes, as a linked chart stack rather than a lone sparkline. It owns no colour at
-  all: it takes `fg`/`accent`/`muted` as properties, because the panel loader injects
-  `service` but not `bar` (`shell.qml:629-637`), so a component importing either
-  palette would be unusable in one of its two homes. §5.5 holds in both.
+  Yes, and as reusable chart components rather than a lone sparkline:
+  `WalkingpadBarChart` for bucketed bars and `WalkingpadTimeChart` for continuous
+  series. Neither owns any colour: both take `fg`/`accent`/`muted` as properties,
+  because the panel loader injects `service` but not `bar` (`shell.qml:629-637`), so
+  a component importing either palette would be unusable in one of its two homes.
+  §5.5 holds in both.
 - **Whether totals are accumulated locally.** Yes, and the state file D-5 deferred
   now exists — see ADR D-6. It lives outside the plugin directory, under
   `${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/` at mode `0700`.

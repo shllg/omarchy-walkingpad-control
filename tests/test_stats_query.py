@@ -615,9 +615,326 @@ def test_every_subcommand_emits_exactly_one_json_object_line(tmp_path):
         run_stats(tmp_path, "session", "--start", str(start)),
         run_stats(tmp_path, "totals", "--by", "all"),
         run_stats(tmp_path, "residuals"),
+        run_stats(tmp_path, "profile"),
     ]
 
     for result in results:
         assert result.returncode == 0, result.stdout + result.stderr
         assert len(result.stdout.strip().splitlines()) == 1
         assert isinstance(json.loads(result.stdout), dict)
+
+
+# ---------------------------------------------------------------- profile
+#
+# Charts §4 moved bucketing into Python so pytest can reach it (ADR D-1). The
+# distinctions that are easy to erase here are the same two the storage model
+# rests on: an omitted bucket is not a zero one, and time nobody observed is not
+# time at zero speed.
+
+
+def write_walk(store_dir, date_string, *, start, seconds, e=1,
+               v=2.5, steps_per_second=2, metres_per_second=0.7,
+               step_seconds=1):
+    """Append one second-by-second running walk and return its samples.
+
+    Cumulative counters are what the store actually records (Stage 3 §2.2), so
+    the fixture advances them rather than writing per-sample deltas.
+    """
+    written = []
+    for index in range(seconds + 1):
+        offset = index * step_seconds
+        written.append(write_sample(
+            store_dir, date_string,
+            t=start + offset,
+            e=e,
+            b="running",
+            v=v,
+            c=v,
+            d=round(offset * metres_per_second / 1000.0, 2),
+            s=offset * steps_per_second,
+            pe=offset,
+        ))
+    return written
+
+
+def test_profile_empty_store_reports_no_extent_and_no_buckets(tmp_path):
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    assert payload == {
+        "bucket_s": 60,
+        "start": None,
+        "end": None,
+        "buckets": [],
+        "speed_histogram": [],
+        "totals": {
+            "dur_s": 0, "dist_km": 0.0, "steps": 0, "v_avg": None,
+            "unobserved_s": 0, "unobserved_dist_km": 0.0,
+            "unobserved_steps": 0,
+        },
+        "skipped_rows": 0,
+    }
+
+
+def test_profile_buckets_steps_by_the_delta_across_bucket_edges(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=180)
+
+    payload = result_json(run_stats(tmp_path, "profile", "--bucket", "60"))
+    buckets = payload["buckets"]
+
+    assert [bucket["t"] for bucket in buckets] == [
+        start, start + 60, start + 120, start + 180]
+    # Each delta is charged to the bucket of the LATER sample, so the period's
+    # first sample opens no interval and its bucket carries only the 59 that
+    # follow it. The trailing bucket holds the single sample past the third
+    # minute, and therefore the one delta that crossed into it.
+    assert [bucket["steps"] for bucket in buckets] == [118, 120, 120, 2]
+    assert [bucket["dur_s"] for bucket in buckets] == [59, 60, 60, 1]
+    assert [bucket["v_avg"] for bucket in buckets] == [2.5, 2.5, 2.5, 2.5]
+
+
+def test_profile_omits_buckets_with_no_samples_but_keeps_measured_zero(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=59)
+    # Stage 3 §2.2 records a 5 s tail after the belt leaves starting/running, so
+    # the minute after a walk really does contain samples whose counters do not
+    # move. That is a measured zero, not an absence.
+    write_sample(tmp_path, "2026-08-26", t=start + 60, b="idle", v=0.0,
+                 c=None, d=0.04, s=118, pe=59)
+    # Ten minutes at the desk, then a second walk. The pad's own counters carry
+    # on from where the first walk left them.
+    resumed = start + 660
+    for index in range(61):
+        write_sample(
+            tmp_path, "2026-08-26",
+            t=resumed + index, e=1, b="running", v=2.5, c=2.5,
+            d=round((59 + index) * 0.7 / 1000.0, 2),
+            s=(59 + index) * 2, pe=59 + index)
+
+    payload = result_json(run_stats(tmp_path, "profile", "--bucket", "60"))
+    drawn = {bucket["t"]: bucket for bucket in payload["buckets"]}
+
+    assert set(drawn) == {start, start + 60, resumed, resumed + 60}
+    # The silent minutes are absent entirely -- that gap is the information.
+    assert start + 300 not in drawn
+    assert drawn[start + 60]["steps"] == 0
+    assert drawn[start + 60]["dur_s"] == 0
+    # No running frame landed there either, so it has no measured speed at all
+    # rather than a fabricated 0.0 km/h.
+    assert drawn[start + 60]["v_avg"] is None
+
+
+def test_profile_never_bridges_a_hole_in_the_sample_record(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_sample(tmp_path, "2026-08-26", t=start, b="running",
+                 v=2.5, d=0.0, s=0, pe=0)
+    # Twenty minutes later the counters have advanced a long way. Nothing
+    # observed that interval, so no bucket may claim it.
+    resumed = start + 1200
+    write_sample(tmp_path, "2026-08-26", t=resumed, b="running",
+                 v=2.5, d=0.84, s=2400, pe=1200)
+
+    payload = result_json(run_stats(tmp_path, "profile", "--bucket", "60"))
+    drawn = {bucket["t"]: bucket for bucket in payload["buckets"]}
+
+    assert set(drawn) == {start, resumed}
+    assert drawn[resumed]["steps"] == 0
+    assert drawn[resumed]["dur_s"] == 0
+    assert payload["speed_histogram"] == []
+
+
+def test_profile_speed_histogram_counts_running_seconds_at_each_speed(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=60, v=2.5)
+    faster = start + 61
+    for index in range(31):
+        write_sample(
+            tmp_path, "2026-08-26",
+            t=faster + index, e=1, b="running", v=3.5, c=3.5,
+            d=round((61 + index) * 0.7 / 1000.0, 2),
+            s=(61 + index) * 2, pe=61 + index)
+
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    # The interval carries the speed of the frame that OPENED it, so the single
+    # 2.5 -> 3.5 step second belongs to 2.5.
+    assert payload["speed_histogram"] == [
+        {"kmh": 2.5, "dur_s": 61}, {"kmh": 3.5, "dur_s": 30}]
+
+
+def test_profile_never_joins_counter_deltas_across_an_epoch_reset(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_sample(tmp_path, "2026-08-26", t=start, e=1, b="running",
+                 v=2.5, d=0.7, s=2000, pe=1000)
+    write_sample(tmp_path, "2026-08-26", t=start + 1, e=2, b="running",
+                 v=2.5, d=0.0, s=0, pe=0)
+    write_sample(tmp_path, "2026-08-26", t=start + 2, e=2, b="running",
+                 v=2.5, d=0.0, s=2, pe=1)
+
+    payload = result_json(run_stats(tmp_path, "profile", "--bucket", "60"))
+
+    assert len(payload["buckets"]) == 1
+    # Only the delta inside epoch 2 survives. The reset itself contributes
+    # nothing rather than a negative, and the pre-reset counters are not carried
+    # across into a coordinate system that does not contain them.
+    assert payload["buckets"][0]["steps"] == 2
+    assert payload["buckets"][0]["dur_s"] == 1
+
+
+def test_profile_bucket_ladder_picks_the_smallest_rung_that_fits(tmp_path):
+    start = epoch(2026, 8, 26, 0)
+    # 120 one-minute buckets exactly, which is the cap rather than one past it.
+    write_bout(tmp_path, {
+        "e": 1, "start": float(start), "end": float(start + 119 * 60),
+        "observed": False, "dur_s": 60, "dist_km": 0.04, "steps": 80,
+    })
+
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    assert payload["bucket_s"] == 60
+
+
+def test_profile_bucket_ladder_steps_up_one_bucket_past_the_cap(tmp_path):
+    start = epoch(2026, 8, 26, 0)
+    write_bout(tmp_path, {
+        "e": 1, "start": float(start), "end": float(start + 120 * 60),
+        "observed": False, "dur_s": 60, "dist_km": 0.04, "steps": 80,
+    })
+
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    assert payload["bucket_s"] == 300
+
+
+def test_profile_axis_spans_the_data_not_the_calendar_period(tmp_path):
+    first = epoch(2026, 8, 26, 9)
+    last = epoch(2026, 8, 26, 14)
+    write_observed_bout(
+        tmp_path, start=first, end=first + 600,
+        dur_s=600, dist_km=0.4, steps=800)
+    write_observed_bout(
+        tmp_path, start=last, end=last + 600,
+        dur_s=600, dist_km=0.4, steps=800)
+
+    payload = result_json(run_stats(
+        tmp_path, "profile",
+        "--since", "2026-08-26", "--until", "2026-08-27"))
+
+    assert payload["start"] == first
+    assert payload["end"] == last + 600
+
+
+def test_profile_totals_disclose_the_unobserved_share_separately(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_observed_bout(
+        tmp_path, start=start, end=start + 600,
+        dur_s=600, dist_km=0.40, steps=800, v_avg=2.5, v_max=2.6, n=600)
+    write_unobserved_bout(
+        tmp_path, start=start + 1200, end=start + 1900,
+        dur_s=700, dist_km=0.48, steps=960)
+
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    assert payload["totals"] == {
+        "dur_s": 1300, "dist_km": 0.88, "steps": 1760, "v_avg": 2.5,
+        "unobserved_s": 700, "unobserved_dist_km": 0.48,
+        "unobserved_steps": 960,
+    }
+    # The unobserved bout has exact totals and no samples, so it widens the axis
+    # and draws no bucket. Charts §2.3: provenance, not accuracy.
+    assert payload["buckets"] == []
+    assert payload["end"] == start + 1900
+
+
+def test_profile_period_with_bouts_but_no_samples_is_not_an_error(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_observed_bout(
+        tmp_path, start=start, end=start + 600,
+        dur_s=600, dist_km=0.4, steps=800)
+
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    assert payload["buckets"] == []
+    assert payload["speed_histogram"] == []
+    assert payload["totals"]["steps"] == 800
+
+
+def test_profile_skips_malformed_rows_in_both_files_and_counts_them(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_observed_bout(
+        tmp_path, start=start, end=start + 60,
+        dur_s=60, dist_km=0.04, steps=80)
+    write_bout(tmp_path, ["not", "an", "object"])
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=5)
+    with (tmp_path / "samples" / "2026-08-26.jsonl").open(
+            "a", encoding="utf-8") as stream:
+        stream.write('{"t": 1, "e"\n')
+    write_sample(tmp_path, "2026-08-26", t=start + 6, s="many")
+
+    payload = result_json(run_stats(tmp_path, "profile"))
+
+    assert payload["skipped_rows"] == 3
+    assert payload["buckets"][0]["steps"] == 10
+
+
+def test_profile_ignores_files_outside_the_requested_range(tmp_path):
+    inside = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=inside, seconds=60)
+    write_walk(tmp_path, "2026-08-20", start=epoch(2026, 8, 20, 9), seconds=60)
+
+    payload = result_json(run_stats(
+        tmp_path, "profile", "--since", "2026-08-26"))
+
+    assert payload["start"] == inside
+    assert all(bucket["t"] >= inside for bucket in payload["buckets"])
+
+
+def test_profile_bucket_rejects_values_that_are_not_auto_or_positive(tmp_path):
+    for value in ("0", "-60", "5.5", "minute"):
+        result = run_stats(tmp_path, "profile", "--bucket", value)
+        payload = result_json(result, expected_code=1)
+
+        assert payload.keys() == {"error"}
+        assert "'auto'" in payload["error"]
+        assert len(result.stdout.strip().splitlines()) == 1
+
+
+def test_profile_accepts_gap_without_changing_what_it_reports(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=60)
+    write_observed_bout(
+        tmp_path, start=start, end=start + 60,
+        dur_s=60, dist_km=0.04, steps=120)
+
+    default_gap = result_json(run_stats(tmp_path, "profile"))
+    wide_gap = result_json(run_stats(tmp_path, "profile", "--gap", "45"))
+
+    assert default_gap == wide_gap
+
+
+def test_profile_coarsening_a_bucket_matches_accumulating_it_directly(tmp_path):
+    start = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=900)
+    # A later bout widens the axis past the 120-bucket cap, so `auto` reaches the
+    # 300 s rung by coarsening the 60 s pass rather than accumulating it directly.
+    write_unobserved_bout(
+        tmp_path, start=start + 10800, end=start + 11400,
+        dur_s=600, dist_km=0.4, steps=800)
+
+    explicit = result_json(run_stats(tmp_path, "profile", "--bucket", "300"))
+    coarsened = result_json(run_stats(tmp_path, "profile"))
+
+    assert coarsened["bucket_s"] == 300
+    assert coarsened["buckets"] == explicit["buckets"]
+
+
+def test_profile_buckets_align_to_the_unix_epoch(tmp_path):
+    # The convention WalkingpadModel.js repeats for the popup: a bucket starts at
+    # floor(t / bucket_s) * bucket_s, so a sample 30 s into a minute lands in the
+    # bucket that minute began, never in one anchored on the sample itself.
+    start = epoch(2026, 8, 26, 9) + 30
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=5)
+
+    payload = result_json(run_stats(tmp_path, "profile", "--bucket", "60"))
+
+    assert payload["buckets"][0]["t"] == epoch(2026, 8, 26, 9)
