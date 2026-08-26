@@ -1,7 +1,11 @@
 # omarchy-walkingpad — design spec
 
-Status: draft for review · 2026-08-24
+Status: implemented · drafted 2026-08-24, last revised 2026-08-26
 Target: standalone Omarchy plugin, own git repo, marketplace submission.
+
+The bridge, the bar widget and popup, the history store with its query tool, and
+the analysis window are all built. What is **not** signed off is the motion
+control against real hardware; `docs/smoke-test.md` §4b and §4c are that gate.
 
 `docs/plugin-evidence.md` records the loader, manifest, installation and
 marketplace implementation details this spec relies on.
@@ -16,7 +20,15 @@ no account and no network access of any kind.
 Non-goals, explicitly:
 - No cloud, no telemetry, no phone-home. Ever.
 - No firmware/OTA features (see §3.3).
-- Not a fitness tracker. Session history beyond the pad's own counters is out of scope for v1.
+- Not a fitness tracker: no goals, no coaching, no streaks or scoring, and no
+  export to anybody else's service.
+
+⚠ **Revised 2026-08-26.** The third non-goal used to end "Session history beyond
+the pad's own counters is out of scope for v1." That clause is **retracted**: §5.7
+and D-6 ship a durable local history store, and the analysis window reads it. What
+survives is the sentence above — the history is a private local record, not a
+fitness product. The clause is called out rather than quietly deleted because a
+reader who stopped at §1 would otherwise conclude the store should not exist.
 
 ## 2. Verified device facts
 
