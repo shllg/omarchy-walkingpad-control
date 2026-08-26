@@ -105,14 +105,15 @@ Panel {
 
   // Charts §0.4: every one of these acts on the TREADMILL. Stats navigates, so
   // it is not a sixth cell here -- adding it shrank each real control from about
-  // 63 px to 52 px against 55 px of content, in a component with neither elide
-  // nor clip. The width was the symptom; the category error was the cause.
+  // 63 px to 52 px, in a component with neither elide nor clip. The width was
+  // the symptom; the category error was the cause. No `icon` field: see the
+  // measurement on the Button below for why the glyph could not stay.
   readonly property var actions: [
-    { key: "start", label: "Start", icon: Model.ICON_START },
-    { key: "stop", label: "Stop", icon: Model.ICON_STOP },
-    { key: "down", label: "-" + root.speedStep.toFixed(1), icon: Model.ICON_MINUS },
-    { key: "up", label: "+" + root.speedStep.toFixed(1), icon: Model.ICON_PLUS },
-    { key: "set", label: "Set", icon: Model.ICON_SET }
+    { key: "start", label: "Start" },
+    { key: "stop", label: "Stop" },
+    { key: "down", label: "-" + root.speedStep.toFixed(1) },
+    { key: "up", label: "+" + root.speedStep.toFixed(1) },
+    { key: "set", label: "Set" }
   ]
 
   function openEditor() {
@@ -732,8 +733,13 @@ Panel {
                 required property int index
 
                 width: actionRow.cellWidth
-                iconText: modelData.icon
-                iconSize: Style.font.title
+                // No glyph. Measured against this theme with TextMetrics: a
+                // glyph plus Style.spacing.controlGap costs 16.4 px, which puts
+                // the widest cell ("Start") at 71.4 px inside a 63.2 px slot --
+                // still overflowing at FIVE buttons, before Stats was ever added.
+                // Label-only content is 55.0 px and fits with 8.2 px to spare,
+                // which is the figure charts §0.4 quotes. Dropping Stats was
+                // necessary and, on its own, not sufficient.
                 text: modelData.label
                 fontSize: Style.font.bodySmall
                 foreground: root.bar.foreground

@@ -10,13 +10,13 @@
 // Supplementary Private Use Area, where a stray editor or transport re-encoding
 // silently truncates them into a different, valid-looking character. Every one
 // was checked against JetBrainsMono Nerd Font with fc-list :charset=.
+//
+// The control row carries no glyphs. Measured against this theme: a glyph plus
+// Style.spacing.controlGap costs 16.4 px per cell, which put the widest control
+// at 71.4 px inside a 63.2 px slot even at five buttons. Only ICON_WALK,
+// ICON_RUN and ICON_STATS have room to be drawn, so only those exist.
 var ICON_WALK = String.fromCodePoint(0xF0583)    // nf-md-walk
 var ICON_RUN = String.fromCodePoint(0xF070E)     // nf-md-run
-var ICON_START = String.fromCodePoint(0xF040A)   // nf-md-play
-var ICON_STOP = String.fromCodePoint(0xF04DB)    // nf-md-stop
-var ICON_MINUS = String.fromCodePoint(0xF0376)   // nf-md-minus
-var ICON_PLUS = String.fromCodePoint(0xF0415)    // nf-md-plus
-var ICON_SET = String.fromCodePoint(0xF03EB)     // nf-md-pencil
 var ICON_STATS = String.fromCodePoint(0xF0128)   // nf-md-chart_bar
 
 // Fact 8: "running" is the ONLY state that means the belt is moving, so the
