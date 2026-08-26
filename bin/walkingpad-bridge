@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from walkingpad.bridge import Bridge
 from walkingpad.replay import ReplayFixtureError, ReplayTransport
 from walkingpad.safety import Safety
+from walkingpad import store as store_module
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="WalkingPad BLE bridge (stdio JSON)")
@@ -29,6 +30,9 @@ if __name__ == "__main__":
                     help="largest speed change a single command may make")
     ap.add_argument("--replay", metavar="PATH",
                     help="play captured status frames instead of using Bluetooth")
+    ap.add_argument("--store", metavar="PATH", default=None,
+                    help="directory for the stats store (default: %s)"
+                         % store_module.DEFAULT_STORE_DIR)
     args = ap.parse_args()
     safety = Safety(max_speed=args.max_speed, max_step=args.max_step)
     transport = None
@@ -44,8 +48,14 @@ if __name__ == "__main__":
         if os.path.samestat(os.fstat(sys.stdin.fileno()), os.stat(os.devnull)):
             replay_stdin, replay_stdin_writer = os.pipe()
             sys.stdin = os.fdopen(replay_stdin, "r")
+    bridge = Bridge(safety=safety, transport=transport)
+    store_path = store_module.resolve_store_path(args.replay, args.store)
+    if store_path is not None:
+        # Bridge must exist first so Store can report its one failure through
+        # the same stdout JSON channel without any second output owner.
+        bridge.store = store_module.Store(store_path, emit=bridge.emit)
     try:
-        Bridge(safety=safety, transport=transport).run()
+        bridge.run()
     except KeyboardInterrupt:
         pass
     finally:

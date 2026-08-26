@@ -248,6 +248,98 @@ Belt running at a known speed, started per §4b.
 **Then re-run §4b once** to confirm the goal has not disturbed the two-part
 start: a goal must never write in the same status frame a start's speed lands.
 
+## 4e. Counters across a stop — stand clear of the belt
+
+Run this first on hardware for Stage 3. The store's attribution model rests on
+the pad's cumulative `time`, `dist_km` and `steps` counters surviving a stop.
+That behaviour is only an operator report from 2026-08-25 (stats design §1.1),
+not a captured measurement. It is weaker evidence than the measured facts in
+AGENTS.md. This procedure upgrades the report to a measured fact, or refutes it.
+
+⚠ This procedure moves the belt. Stand clear of the pad before starting it, and
+do not let anyone stand on the belt during any step here.
+
+**Preconditions.** Pad awake, `mode` reads `manual` in the status stream — press
+**M** on the panel if it does not. Phone app closed. Belt clear. Run the bridge
+by hand so stdout is visible; a normal real-pad run writes samples to the default
+store without any additional flag:
+
+```
+./bin/walkingpad-bridge
+```
+
+**Procedure.**
+
+1. Type `{"cmd":"start","kmh":2.0}` to use the two-part start from §4b at a
+   modest speed. Confirm `belt` reads `"running"`.
+2. Walk for one minute. Immediately before the next step, record the `time`,
+   `dist_km` and `steps` fields from the status stream.
+3. Type `{"cmd":"stop"}`. The current running frame is why
+   `Safety.may_stop()` permits this: fact 16 gates stop because its opcode is a
+   toggle, while fact 18 leaves stop unthrottled so a second deliberate press is
+   never swallowed. Wait twenty seconds with the belt stopped.
+4. Start the belt again with the two-part start from §4b, then walk for one more
+   minute.
+5. Record `time`, `dist_km` and `steps` as soon as `belt` reads `"running"`
+   after the restart, then record all three again at the end of the second
+   walking minute.
+
+**What to record.**
+
+- Record all three counter snapshots: immediately before the stop, immediately
+  after the restart, and at the end of the second walking minute.
+- If `time`, `dist_km` and `steps` continue climbing after the restart from where
+  they were before the stop, rather than dropping toward zero, that confirms the
+  counters survive a stop. The attribution model in the stats design is sound as
+  designed.
+- If any counter drops back toward zero after the restart, every stop is an epoch
+  reset in that model. The `residual` concept becomes meaningless as designed,
+  and the attribution model needs rework before it can be trusted. This is a real
+  possible outcome: record it honestly rather than explaining it away.
+
+## 4f. The sleep boundary's counter half
+
+Section 5's Q7 steps 25–26 time the first half of the sleep boundary: when the
+pad stops being reachable at all. This procedure observes what happens to the
+pad's cumulative counters across that same boundary.
+
+Nothing here moves the belt or writes a motion command. You can run it with the
+pad simply sitting there powered on; it does not carry the standing-clear
+requirement of the movement procedures. The sleep timeout is unmeasured, so be
+patient and note every wall-clock time carefully.
+
+AGENTS.md fact 3 establishes that BLE cannot wake a sleeping pad. Wake it
+physically at the panel or with the remote. This procedure cannot be scripted or
+automated for that reason.
+
+**Procedure.**
+
+1. With the bridge running and connected, stop sending commands. Note the
+   wall-clock time.
+2. Let the bridge keep polling. Wait for `{"t":"link","state":"lost"}` or for
+   a subsequent scan to report `"absent"`. Note the wall-clock time and keep the
+   last status line from before the loss.
+3. Leave the pad alone for a while longer; do not touch it. Then wake it
+   physically with any panel interaction that would normally wake it, or with
+   the remote. Note the wall-clock time.
+4. Let the bridge reconnect; it rescans on its own. Record the first status
+   frame's `time`, `dist_km` and `steps`.
+
+**What to record.**
+
+- Record the three wall-clock timestamps from steps 1–3, how long the pad stayed
+  reachable before sleep, and how long it remained asleep before the physical
+  wake.
+- Record the last pre-sleep and first reconnected `time`, `dist_km` and `steps`
+  values. Say whether the reconnected counters are near zero, indicating a
+  reset, or continue from where they were before sleep.
+- This observation bounds but cannot close the under-count in the stats design
+  §10. An unobserved reset under-counts, and no heuristic can fix it. Treating a
+  long wall-clock gap as "probably a sleep" would silently invent numbers, which
+  is worse than under-counting a case the totals already mark as unobserved. This
+  procedure can only narrow the estimate of how long a reset takes; it cannot
+  eliminate the gap.
+
 ## 5. Read-only observations for open questions
 
 Nothing in this section moves the belt or writes a motion command. It is safe to
@@ -366,3 +458,8 @@ this session.
 - **Do not kill the bridge with SIGKILL.** BlueZ then keeps reporting a link that
   is already dead. The bridge recovers on its own — it adopts the stale link, sees
   no frames for 15 s, tears it down and rescans — but expect one slow cycle.
+- **A hardware smoke test writes real stats.** Every session against the real pad
+  leaves recorded bouts in `${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/`,
+  mixed with real walking history. `bin/walkingpad-bridge --replay` deliberately
+  skips that store unless `--store PATH` is also passed, so a replay session with
+  no hardware cannot pollute the real record.

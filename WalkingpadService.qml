@@ -35,6 +35,12 @@ Item {
   readonly property int elapsedSec: state.elapsedSec
   readonly property real distanceKm: state.distanceKm
   readonly property int steps: state.steps
+  readonly property var samples: state.samples
+  // Stage 3 §7 and ADR D-5 make this a read-time presentation preference:
+  // the popup forwards it when settings exist, while this working default keeps
+  // grouping defined when no widget exists. It is never sent to the bridge.
+  property real gapMinutes: 5
+  readonly property var sessionSamples: root.computeSessionSamples()
   readonly property string lastErrorCode: state.lastErrorCode
   readonly property string lastErrorMessage: state.lastErrorMessage
 
@@ -74,6 +80,21 @@ Item {
   readonly property bool ramping: state.hasStatus
     && root.targetSpeed !== null
     && Math.abs(state.currentSpeed - Number(root.targetSpeed)) >= root.rampDeadband
+
+  function computeSessionSamples() {
+    var samples = state.samples
+    var gapSeconds = root.gapMinutes * 60
+    for (var i = samples.length - 1; i > 0; --i) {
+      // Stage 3 §1.3 merges only separations strictly LESS than the gap, so
+      // equality splits. The Python query and this JS reader deliberately apply
+      // §7 independently; their duplicated boundary must therefore agree exactly.
+      if (samples[i].t - samples[i - 1].t >= gapSeconds)
+        return samples.slice(i)
+    }
+    // An empty buffer is the pad's normal resting state (fact 3), and falls
+    // through here exactly like any other buffer containing no session gap.
+    return samples
+  }
 
   // -- commands -------------------------------------------------------------
 
@@ -230,30 +251,75 @@ Item {
   function handleStatus(event) {
     // A status frame is the bridge's proof of a working link; BlueZ connection
     // state alone is not sufficient on this pad (fact 9).
+    var speed = Number(event.speed)
+    var commanded = event.target === null ? null : Number(event.target)
+    var goal = (event.goal === null || event.goal === undefined)
+      ? null : Number(event.goal)
+    var padSet = Number(event.pad_set_speed)
+    var frameMode = String(event.mode)
+    var elapsed = Number(event.time)
+    var distance = Number(event.dist_km)
+    var frameSteps = Number(event.steps)
+    var belt = String(event.belt)
+
     state.linkState = "connected"
     state.linkMessage = ""
     state.hasStatus = true
-    state.currentSpeed = Number(event.speed)
-    state.commandedSpeed = event.target === null ? null : Number(event.target)
-    state.goalSpeed = (event.goal === null || event.goal === undefined)
-      ? null : Number(event.goal)
+    state.currentSpeed = speed
+    state.commandedSpeed = commanded
+    state.goalSpeed = goal
     // The optimistic copy has done its job once the bridge is echoing a goal
     // and nothing further is queued to send.
     if (!goalDebounce.running) state.pendingGoal = null
-    state.padSetSpeed = Number(event.pad_set_speed)
-    state.mode = String(event.mode)
-    state.elapsedSec = Number(event.time)
-    state.distanceKm = Number(event.dist_km)
-    state.steps = Number(event.steps)
+    state.padSetSpeed = padSet
+    state.mode = frameMode
+    state.elapsedSec = elapsed
+    state.distanceKm = distance
+    state.steps = frameSteps
     // Assigned LAST, deliberately. beltState is the property consumers watch to
     // decide the belt is moving, and every other field in this frame has to be
     // in place before that signal goes out -- otherwise a handler reads the new
     // belt state beside the PREVIOUS frame's speed and mode.
-    state.beltState = String(event.belt)
+    state.beltState = belt
     // NOTE: the last error is deliberately NOT cleared here. Status arrives at
     // 1 Hz, so clearing it per frame flashed every refusal for under a second
     // and made stop look like it had simply done nothing. A refusal stays up
     // until the user's next action clears it in send().
+
+    var wall = Date.now() / 1000
+    var active = belt === "starting" || belt === "running"
+    var recordable
+    // Design §2.2: recording every idle poll would keep consecutive gaps below
+    // gapMinutes and silently merge separate walks. Record starting/running and
+    // a 5 s tail so both ends of the measured speed ramp remain visible.
+    if (active) {
+      state.tailDeadline = 0
+      recordable = true
+    } else {
+      if (state.wasActive) state.tailDeadline = wall + 5
+      recordable = state.tailDeadline > 0 && wall <= state.tailDeadline
+      if (!recordable) state.tailDeadline = 0
+    }
+    state.wasActive = active
+
+    if (recordable) {
+      var samples = state.samples.slice()
+      samples.push({
+        t: wall,
+        e: 0,
+        b: belt,
+        m: frameMode,
+        v: speed,
+        c: commanded,
+        g: goal,
+        d: distance,
+        s: frameSteps,
+        pe: elapsed
+      })
+      if (samples.length > 3600) samples.shift()
+      // QML observes the property assignment, not an in-place array mutation.
+      state.samples = samples
+    }
   }
 
   function handleLink(event) {
@@ -271,6 +337,12 @@ Item {
     state.pendingSpeed = null
     state.pendingGoal = null
     state.goalSpeed = null
+    // Fact 3 makes link loss and sleep ordinary resting states, so design §5.7's
+    // dormant view must retain its last curve. The read-time gap rule owns
+    // session boundaries: a long absence starts a new session and a short blip
+    // keeps one together, whereas an explicit wipe destroys both distinctions.
+    state.wasActive = false
+    state.tailDeadline = 0
     state.lastErrorCode = ""
     state.lastErrorMessage = ""
   }
@@ -325,6 +397,9 @@ Item {
     property int elapsedSec: 0
     property real distanceKm: 0
     property int steps: 0
+    property var samples: []
+    property bool wasActive: false
+    property real tailDeadline: 0
     property string lastErrorCode: ""
     property string lastErrorMessage: ""
     property int respawns: 0
@@ -357,6 +432,12 @@ Item {
       state.pendingGoal = null
       state.goalSpeed = null
       state.commandedSpeed = null
+      // A bridge lifetime is not a session boundary. Stage 3 §1.4 deliberately
+      // lets the gap rule re-merge crash fragments, and fact 3 says a respawn or
+      // sleeping pad must not blank the dormant chart. The transition-local 5 s
+      // tail still ends here because it cannot survive a link change.
+      state.wasActive = false
+      state.tailDeadline = 0
 
       // Bounded respawn. This is NOT the auto-retry fact 17 forbids: that rule
       // is about re-sending COMMANDS to the pad, and a fresh bridge sends none

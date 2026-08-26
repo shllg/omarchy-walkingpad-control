@@ -1,0 +1,417 @@
+#!/usr/bin/python3
+"""Read the WalkingPad history store and emit one JSON query result."""
+import os
+import sys
+
+# ⚠ Load-bearing, and it must run before any possible plugin-local import.
+#
+# This repository is the installed plugin, and the shell watches its directory
+# recursively with inotifywait. A stray __pycache__ write therefore looks like
+# a plugin edit and triggers a full reload that kills the live bridge. Keep the
+# guard here even though this reader currently needs no walkingpad module, so a
+# later import cannot turn opening the analysis window into a plugin reload.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import argparse
+import json
+import math
+from datetime import datetime, timedelta, timezone
+
+
+def emit(payload):
+    # Stage 3 §3.2 promises exactly one JSON object, which excludes Python's
+    # permissive NaN and Infinity tokens because the QML caller uses JSON.parse.
+    print(json.dumps(payload, allow_nan=False))
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        emit({"error": message})
+        sys.exit(1)
+
+
+def default_store_dir():
+    state_home = os.environ.get("XDG_STATE_HOME")
+    if not state_home:
+        state_home = os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(state_home, "walkingpad")
+
+
+def finite_nonnegative_float(value):
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    # Stage 3 §3.2 exposes gap_minutes as presentation policy, but it still has
+    # to describe a real interval. Reject non-finite and negative values at the
+    # argument boundary so neither grouping nor JSON output can carry them.
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than or equal to 0")
+    return number
+
+
+def build_parser():
+    parser = JsonArgumentParser(
+        description="Read WalkingPad history (stdout JSON)", add_help=False)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    sessions = commands.add_parser("sessions", add_help=False)
+    sessions.add_argument("--since")
+    sessions.add_argument("--until")
+    sessions.add_argument("--gap", type=finite_nonnegative_float, default=5.0)
+    sessions.add_argument("--store", default=default_store_dir())
+
+    session = commands.add_parser("session", add_help=False)
+    session.add_argument("--start", type=float, required=True)
+    session.add_argument("--gap", type=finite_nonnegative_float, default=5.0)
+    session.add_argument("--store", default=default_store_dir())
+
+    totals = commands.add_parser("totals", add_help=False)
+    totals.add_argument("--by", choices=("day", "week", "month", "all"),
+                        required=True)
+    totals.add_argument("--since")
+    totals.add_argument("--until")
+    totals.add_argument("--store", default=default_store_dir())
+
+    residuals = commands.add_parser("residuals", add_help=False)
+    residuals.add_argument("--store", default=default_store_dir())
+    return parser
+
+
+def is_number(value):
+    return type(value) in (int, float)
+
+
+def require_type(value, expected, field):
+    if type(value) is not expected:
+        raise ValueError(f"{field} has the wrong type")
+
+
+def require_number(value, field):
+    if not is_number(value):
+        raise ValueError(f"{field} has the wrong type")
+
+
+def validate_bout(bout):
+    if not isinstance(bout, dict):
+        raise ValueError("bouts.jsonl row is not an object")
+    require_type(bout["e"], int, "bout.e")
+    require_number(bout["start"], "bout.start")
+    require_number(bout["end"], "bout.end")
+    require_type(bout["observed"], bool, "bout.observed")
+    require_type(bout["dur_s"], int, "bout.dur_s")
+    require_number(bout["dist_km"], "bout.dist_km")
+    require_type(bout["steps"], int, "bout.steps")
+    if bout["observed"]:
+        require_number(bout["v_avg"], "bout.v_avg")
+        require_number(bout["v_max"], "bout.v_max")
+        require_type(bout["n"], int, "bout.n")
+
+
+def validate_sample(sample):
+    if not isinstance(sample, dict):
+        raise ValueError("sample row is not an object")
+    require_number(sample["t"], "sample.t")
+    require_type(sample["e"], int, "sample.e")
+    require_type(sample["b"], str, "sample.b")
+    require_type(sample["m"], str, "sample.m")
+    require_number(sample["v"], "sample.v")
+    for field in ("c", "g"):
+        if sample[field] is not None:
+            require_number(sample[field], f"sample.{field}")
+    require_number(sample["d"], "sample.d")
+    require_type(sample["s"], int, "sample.s")
+    require_type(sample["pe"], int, "sample.pe")
+
+
+def read_jsonl(path, validator):
+    try:
+        stream = open(path, "r", encoding="utf-8")
+    except FileNotFoundError:
+        return [], 0
+
+    rows = []
+    skipped_rows = 0
+    with stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+                validator(row)
+            except Exception:
+                # Stage 3 §2.2/§2.3 never prune these durable files. A torn,
+                # future-schema, hand-edited or wrong-shaped row must therefore
+                # cost only itself, not every later query; count it so "empty"
+                # remains distinguishable from "all rows unreadable".
+                skipped_rows += 1
+                continue
+            rows.append(row)
+    return rows, skipped_rows
+
+
+def read_bouts(store_dir):
+    return read_jsonl(os.path.join(store_dir, "bouts.jsonl"), validate_bout)
+
+
+def parse_iso(value):
+    if value is None:
+        return None
+    return datetime.fromisoformat(value).timestamp()
+
+
+def filter_bouts(bouts, since, until):
+    since_ts = parse_iso(since)
+    until_ts = parse_iso(until)
+    # Stage 3 §3.2 makes these literal local timestamps. In particular, a
+    # date-only --until is midnight, not an invitation to widen it to end-of-day.
+    return [
+        bout for bout in bouts
+        if (since_ts is None or bout["start"] >= since_ts)
+        and (until_ts is None or bout["start"] <= until_ts)
+    ]
+
+
+def group_sessions(bouts, gap_minutes):
+    ordered = sorted(bouts, key=lambda bout: bout["start"])
+    groups = []
+    group_end = None
+    for bout in ordered:
+        if not groups:
+            groups.append([bout])
+            group_end = bout["end"]
+            continue
+        # Stage 3 §1.3 groups by the gap from the session's covered span, not
+        # merely from the row most recently sorted by start. Nested or overlapping
+        # bouts may end earlier than an older long bout, so carry the maximum end;
+        # strictly less than the configured gap merges and equality still splits.
+        if bout["start"] - group_end < gap_minutes * 60:
+            groups[-1].append(bout)
+            group_end = max(group_end, bout["end"])
+        else:
+            groups.append([bout])
+            group_end = bout["end"]
+    return groups
+
+
+# Stage 3 §1.3/§2.3 makes an unobserved bout's counter totals exact even
+# though its placement and speed curve are unknown. Include that share in the
+# true total, disclose it separately, and never invent sample-derived speeds for
+# it. Treating unobserved_* as an alternative total would under-report the pad.
+def summarize_bouts(bouts):
+    observed_bouts = [bout for bout in bouts if bout["observed"]]
+    unobserved_bouts = [bout for bout in bouts if not bout["observed"]]
+    sample_count = sum(bout["n"] for bout in observed_bouts)
+
+    v_avg = None
+    if observed_bouts and sample_count:
+        weighted_speed = sum(
+            bout["v_avg"] * bout["n"] for bout in observed_bouts)
+        v_avg = round(weighted_speed / sample_count, 1)
+    v_max = None
+    if observed_bouts:
+        v_max = round(max(bout["v_max"] for bout in observed_bouts), 1)
+
+    return {
+        "start": bouts[0]["start"],
+        "end": max(bout["end"] for bout in bouts),
+        "dur_s": sum(bout["dur_s"] for bout in bouts),
+        "dist_km": round(sum(
+            (bout["dist_km"] for bout in bouts), 0.0), 2),
+        "steps": sum(bout["steps"] for bout in bouts),
+        "v_avg": v_avg,
+        "v_max": v_max,
+        "observed": all(bout["observed"] for bout in bouts),
+        "unobserved_s": sum(bout["dur_s"] for bout in unobserved_bouts),
+        "unobserved_dist_km": round(sum(
+            (bout["dist_km"] for bout in unobserved_bouts), 0.0), 2),
+        "unobserved_steps": sum(
+            bout["steps"] for bout in unobserved_bouts),
+        "bouts": bouts,
+    }
+
+
+def query_sessions(args):
+    bouts, skipped_rows = read_bouts(args.store)
+    bouts = filter_bouts(bouts, args.since, args.until)
+    groups = group_sessions(bouts, args.gap)
+    return {
+        "gap_minutes": args.gap,
+        "sessions": [summarize_bouts(group) for group in groups],
+        "skipped_rows": skipped_rows,
+    }
+
+
+MAX_SESSION_SAMPLE_DAYS = 31
+
+
+def utc_dates(start, end):
+    current = datetime.fromtimestamp(start, tz=timezone.utc).date()
+    final = datetime.fromtimestamp(end, tz=timezone.utc).date()
+    while current <= final:
+        yield current.isoformat()
+        current += timedelta(days=1)
+
+
+def read_session_samples(store_dir, start, end):
+    samples = []
+    skipped_rows = 0
+    # Stage 3 §3.2 keeps unbounded sample work away from both the bridge and
+    # the UI. A detail query therefore opens only UTC-day files touched by this
+    # resolved session, never every file under samples/. Thirty-one days is far
+    # beyond a real session's minutes-to-hours span, but caps an adversarial bout
+    # before an implausible range turns into millions of failed file opens.
+    first_date = datetime.fromtimestamp(start, tz=timezone.utc).date()
+    last_date = datetime.fromtimestamp(end, tz=timezone.utc).date()
+    day_count = (last_date - first_date).days + 1
+    if day_count > MAX_SESSION_SAMPLE_DAYS:
+        raise ValueError(
+            f"session spans {day_count} UTC sample days; maximum is "
+            f"{MAX_SESSION_SAMPLE_DAYS}"
+        )
+    for date_string in utc_dates(start, end):
+        path = os.path.join(store_dir, "samples", f"{date_string}.jsonl")
+        file_samples, file_skipped_rows = read_jsonl(path, validate_sample)
+        skipped_rows += file_skipped_rows
+        for sample in file_samples:
+            if start <= sample["t"] <= end:
+                samples.append(sample)
+    return sorted(samples, key=lambda sample: sample["t"]), skipped_rows
+
+
+def query_session(args):
+    bouts, skipped_bouts = read_bouts(args.store)
+    groups = group_sessions(bouts, args.gap)
+    match = next(
+        (group for group in groups if group[0]["start"] == args.start), None)
+    if match is None:
+        raise ValueError(f"session starting at {args.start} was not found")
+    summary = summarize_bouts(match)
+    samples, skipped_samples = read_session_samples(
+        args.store, summary["start"], summary["end"])
+    return {
+        "gap_minutes": args.gap,
+        "session": summary,
+        "samples": samples,
+        "skipped_rows": skipped_bouts + skipped_samples,
+    }
+
+
+def bucket_key(bout, by):
+    if by == "all":
+        return "all"
+    local_date = datetime.fromtimestamp(bout["start"]).date()
+    if by == "day":
+        return local_date.isoformat()
+    if by == "week":
+        return (local_date - timedelta(days=local_date.weekday())).isoformat()
+    return local_date.strftime("%Y-%m")
+
+
+def query_totals(args):
+    bouts, skipped_rows = read_bouts(args.store)
+    bouts = filter_bouts(bouts, args.since, args.until)
+    grouped = {}
+    for bout in bouts:
+        grouped.setdefault(bucket_key(bout, args.by), []).append(bout)
+
+    buckets = []
+    for key in sorted(grouped):
+        bouts_in_bucket = sorted(grouped[key], key=lambda bout: bout["start"])
+        summary = summarize_bouts(bouts_in_bucket)
+        buckets.append({
+            "key": key,
+            "start": min(bout["start"] for bout in bouts_in_bucket),
+            "end": max(bout["end"] for bout in bouts_in_bucket),
+            "dur_s": summary["dur_s"],
+            "dist_km": summary["dist_km"],
+            "steps": summary["steps"],
+            "v_avg": summary["v_avg"],
+            "unobserved_s": summary["unobserved_s"],
+            "unobserved_dist_km": summary["unobserved_dist_km"],
+            "unobserved_steps": summary["unobserved_steps"],
+        })
+    return {"by": args.by, "buckets": buckets,
+            "skipped_rows": skipped_rows}
+
+
+def zero_residuals(state_status):
+    return {
+        "state_status": state_status,
+        "epoch": 0,
+        "last_pad": {"elapsed_s": 0, "dist_km": 0.0, "steps": 0},
+        "attributed": {"elapsed_s": 0, "dist_km": 0.0, "steps": 0},
+        "residual": {"elapsed_s": 0, "dist_km": 0.0, "steps": 0},
+        "last_seen_wall": None,
+    }
+
+
+def validate_counter(counter, field):
+    if not isinstance(counter, dict):
+        raise ValueError(f"{field} has the wrong type")
+    require_type(counter["elapsed_s"], int, f"{field}.elapsed_s")
+    require_number(counter["dist_km"], f"{field}.dist_km")
+    require_type(counter["steps"], int, f"{field}.steps")
+
+
+def query_residuals(args):
+    path = os.path.join(args.store, "state.json")
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            state = json.load(stream)
+    except FileNotFoundError:
+        # A store with no state yet is a normal first-run result, not a failed
+        # query. The explicit Stage 3 §2.4 status separates that absence from
+        # both authoritative zeros and a cache that exists but cannot be trusted.
+        return zero_residuals("not_found")
+    except Exception:
+        return zero_residuals("unreadable")
+
+    try:
+        if not isinstance(state, dict):
+            raise ValueError("state.json is not an object")
+        require_type(state["epoch"], int, "state.epoch")
+        validate_counter(state["last_pad"], "state.last_pad")
+        validate_counter(state["attributed"], "state.attributed")
+        last_seen_wall = state.get("last_seen_wall")
+        if last_seen_wall is not None:
+            require_number(last_seen_wall, "state.last_seen_wall")
+    except Exception:
+        # Stage 3 §2.4 defines state.json as a reconstructable advisory cache.
+        # Torn or wrong-shaped state means attribution is unknown; keep the query
+        # usable while naming that uncertainty instead of reporting authoritative
+        # zeros, and leave reconstruction to the raw cumulative sample evidence.
+        return zero_residuals("unreadable")
+
+    last_pad = state["last_pad"]
+    attributed = state["attributed"]
+    return {
+        "state_status": "ok",
+        "epoch": state["epoch"],
+        "last_pad": last_pad,
+        "attributed": attributed,
+        "residual": {
+            "elapsed_s": last_pad["elapsed_s"] - attributed["elapsed_s"],
+            "dist_km": round(
+                last_pad["dist_km"] - attributed["dist_km"], 2),
+            "steps": last_pad["steps"] - attributed["steps"],
+        },
+        "last_seen_wall": last_seen_wall,
+    }
+
+
+def dispatch(args):
+    if args.command == "sessions":
+        return query_sessions(args)
+    if args.command == "session":
+        return query_session(args)
+    if args.command == "totals":
+        return query_totals(args)
+    return query_residuals(args)
+
+
+if __name__ == "__main__":
+    try:
+        emit(dispatch(build_parser().parse_args()))
+    except Exception as exc:
+        emit({"error": str(exc)})
+        sys.exit(1)

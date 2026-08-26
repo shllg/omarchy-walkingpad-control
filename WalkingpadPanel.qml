@@ -52,6 +52,11 @@ Panel {
     && !Model.isAdvisory(service.lastErrorCode)
 
   property int cursorIndex: -1
+  // The action row and chart address different collections. Keeping their
+  // cursors separate prevents a hovered sample from becoming a button index;
+  // the zone says which one the keyboard owns without conflating those indices.
+  property int chartCursorIndex: -1
+  property string cursorZone: "actions"
 
   // The Set editor is disclosed rather than permanent. A text field living in a
   // bar popup holds focus away from the panel's key catcher for as long as it
@@ -88,7 +93,8 @@ Panel {
     { key: "stop", label: "Stop", icon: Model.ICON_STOP },
     { key: "down", label: "-" + root.speedStep.toFixed(1), icon: Model.ICON_MINUS },
     { key: "up", label: "+" + root.speedStep.toFixed(1), icon: Model.ICON_PLUS },
-    { key: "set", label: "Set", icon: Model.ICON_SET }
+    { key: "set", label: "Set", icon: Model.ICON_SET },
+    { key: "analysis", label: "Stats", icon: Model.ICON_STATS }
   ]
 
   function openEditor() {
@@ -129,6 +135,14 @@ Panel {
   }
 
   function invoke(key) {
+    if (key === "analysis") {
+      if (root.bar && root.bar.shell
+          && typeof root.bar.shell.summon === "function") {
+        root.bar.shell.summon("io.github.shllg.walkingpad", "{}")
+      }
+      root.close()
+      return
+    }
     if (!service) return
     if (key === "set") { root.toggleEditor(); return }
     // Any real command supersedes a half-typed value. start() and stop() both
@@ -144,6 +158,10 @@ Panel {
   }
 
   function activateCursor() {
+    // A chart point has nothing to activate. Falling through here would turn
+    // Enter while reading the chart into whichever belt command the retained
+    // action cursor names, which is precisely why the zone must gate dispatch.
+    if (root.cursorZone !== "actions") return
     if (cursorIndex < 0 || cursorIndex >= actions.length) return
     invoke(actions[cursorIndex].key)
   }
@@ -154,14 +172,47 @@ Panel {
     cursorIndex = Math.max(0, Math.min(actions.length - 1, next))
   }
 
-  // Spec §7 and D-5: forwarded settings bound what this panel ASKS for. They
-  // are not the safety limits -- the bridge clamps every command again against
-  // its own, which is the copy that has tests.
+  function moveChartCursor(delta) {
+    var count = root.service ? root.service.sessionSamples.length : 0
+    if (count === 0) { chartCursorIndex = -1; return }
+    var next = chartCursorIndex + delta
+    chartCursorIndex = Math.max(0, Math.min(count - 1, next))
+  }
+
+  function handleMove(dx, dy) {
+    // Plan §5 gives the axes different meanings: vertical changes zones and
+    // horizontal scrubs within one. There is deliberately no vertical wrap,
+    // because leaving the chart must be an explicit move back toward controls.
+    if (dy !== 0) {
+      if (dy < 0 && cursorZone === "actions") {
+        // Fact 3 makes an empty chart the normal resting state, not an error.
+        // Refusing that zone avoids presenting a keyboard cursor with nowhere
+        // to go; when data exists, its live end is the useful first reading.
+        var count = root.service ? root.service.sessionSamples.length : 0
+        if (count === 0) return
+        cursorZone = "chart"
+        chartCursorIndex = count - 1
+      } else if (dy > 0 && cursorZone === "chart") {
+        cursorZone = "actions"
+        chartCursorIndex = -1
+      }
+      return
+    }
+    if (dx === 0) return
+    if (cursorZone === "actions") root.moveCursor(dx)
+    else if (cursorZone === "chart") root.moveChartCursor(dx)
+  }
+
+  // Spec §7 and D-5: this forwarding channel carries preferences only.
+  // gapMinutes regroups bounded read-side samples for presentation; the speed
+  // values bound what this panel ASKS for, while tested bridge policy remains
+  // authoritative for every command and receives none of these assignments.
   function applySettings() {
     if (!service) return
     service.maxSpeed = Number(setting("maxSpeed", 6.0))
     service.speedStep = Number(setting("speedStep", 0.5))
     service.startSpeed = Number(setting("startSpeed", 2.0))
+    service.gapMinutes = Number(setting("gapMinutes", 5))
   }
 
   onServiceChanged: applySettings()
@@ -171,6 +222,8 @@ Panel {
   // there on the next visit reads as a fault the plugin is stuck in.
   onOpenedChanged: {
     cursorIndex = -1
+    chartCursorIndex = -1
+    root.cursorZone = "actions"
     // Assigned directly rather than via closeEditor(), which hands focus back
     // to the key catcher -- not something to do to a panel on its way out.
     root.editing = false
@@ -246,7 +299,7 @@ Panel {
       // BeforeItem, so without this the panel swallows Escape, Enter and every
       // arrow before the text field below ever sees them.
       blocked: root.editing
-      onMoveRequested: function(dx, dy) { root.moveCursor(dx !== 0 ? dx : dy) }
+      onMoveRequested: function(dx, dy) { root.handleMove(dx, dy) }
       onActivateRequested: root.activateCursor()
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
@@ -370,6 +423,48 @@ Panel {
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
+        }
+
+        // Samples continue changing while the popup is closed. Unloading the
+        // chart removes every Canvas then, so invisible 1 Hz updates cannot
+        // repaint the background, four data rows and cursor overlay.
+        Loader {
+          id: chartLoader
+          width: parent.width
+          active: root.opened
+
+          sourceComponent: Component {
+            WalkingpadChartStack {
+              width: chartLoader.width
+              samples: root.service ? root.service.sessionSamples : []
+              rows: ["speed", "cadence", "distance", "steps"]
+              // Stage 3 §5 calls for compact, roughly 24 px rows here. Passing
+              // every Canvas dimension through Style preserves those proportions
+              // while honouring Omarchy's live spacing and font scales.
+              implicitWidth: Style.space(240)
+              rowHeight: Style.space(24)
+              rowSpacing: Style.space(4)
+              axisHeight: Style.space(14)
+              fg: root.bar.foreground
+              accent: Color.accent
+              muted: Qt.darker(root.bar.foreground, 1.4)
+              fontFamily: root.bar.fontFamily
+              labelFontSize: Style.font.caption
+              lineWidth: Style.space(1)
+              dashLength: Style.space(4)
+              dashSpacing: Style.space(3)
+              cursorIndex: root.chartCursorIndex
+              interactive: true
+              // Pointer and keyboard share the same cursor owner. A valid hover
+              // enters the chart zone so the next arrow continues at that sample;
+              // -1 is the chart's empty-data sentinel and cannot focus the zone.
+              onCursorMoved: function(index) {
+                if (index < 0) return
+                root.cursorZone = "chart"
+                root.chartCursorIndex = index
+              }
+            }
+          }
         }
 
         // ---------- Session ----------
@@ -525,9 +620,16 @@ Panel {
                 bordered: true
                 // Fact 8: only "running" means the belt is moving.
                 active: modelData.key === "stop" && root.beltState === "running"
-                hasCursor: root.cursorIndex === index
+                hasCursor: root.cursorZone === "actions" && root.cursorIndex === index
                 onClicked: root.invoke(modelData.key)
-                onHovered: function(h) { if (h) root.cursorIndex = index }
+                onHovered: function(h) {
+                  if (!h) return
+                  // Pointer and keyboard share one cursor owner. Handing it to the
+                  // zone last addressed makes the next arrow continue from there.
+                  root.cursorZone = "actions"
+                  root.cursorIndex = index
+                  root.chartCursorIndex = -1
+                }
               }
             }
           }

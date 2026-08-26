@@ -425,27 +425,34 @@ reason rather than deriving it. Distinguish it clearly from `absent` (asleep,
 nothing to be done from here) and from `unavailable` (the phone app holds the
 single BLE connection).
 
-### 5.7 Stats and visuals (Stage 2 scope, noted)
+### 5.7 Stats, session charts and the analysis window
 
-Beyond the minimum controls, the bar widget is to show session stats and some
-visual treatment of them. Not yet designed; recorded here so it is not lost.
+**DESIGNED 2026-08-26 — see `docs/plans/2026-08-26-stats-and-analysis.md` (Stage 3).**
+That document is authoritative for the store, the attribution model, the chart
+component and the overlay window. This section records only what it resolved.
 
-The bridge already emits everything needed per poll: `speed`, `target`, `belt`,
-`mode`, `time`, `dist_km`, `steps`. Open design questions:
+All four open questions this section held are answered there:
 
-- Which figure earns the bar's scarce horizontal space when the belt is running,
-  and which move into the menu.
-- Whether a sparkline or progress arc is worth it in a bar-height strip, and how
-  it renders under a theme that has no accent contrast to spare.
-- Whether daily totals are accumulated locally. The pad's own counters reset, and
-  persisting anything means owning a state file, which is a new concern the bridge
-  currently does not have. D-5 defers that file until this question or §5.4 forces
-  it, and records a direct `FileView` mechanism precedent.
-- What the dormant state shows. It is the common case (§2.1) and must read as
-  deliberate rather than as a failed connection.
+- **Which figures the bar shows.** The popup keeps its existing Distance/Steps/Time
+  pairs and gains a compact four-row chart stack; the bar strip itself is unchanged.
+- **Whether a sparkline is worth it, and how it renders with no accent contrast.**
+  Yes, as a linked chart stack rather than a lone sparkline. It owns no colour at
+  all: it takes `fg`/`accent`/`muted` as properties, because the panel loader injects
+  `service` but not `bar` (`shell.qml:629-637`), so a component importing either
+  palette would be unusable in one of its two homes. §5.5 holds in both.
+- **Whether totals are accumulated locally.** Yes, and the state file D-5 deferred
+  now exists — see ADR D-6. It lives outside the plugin directory, under
+  `${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/` at mode `0700`.
+- **What the dormant state shows.** Last session's chart and totals, read from the
+  store, rather than an empty frame. Absence is the normal resting state (§2.1) and
+  must not read as a failed connection.
 
-All of it inherits §5.5: stats are rendered with `qs.Commons` and `qs.Ui`, with no
-colour of the plugin's own.
+The load-bearing idea, and the reason a naive implementation gets this wrong: the
+pad's counters are cumulative and survive a stop, so **the pad's counter is the
+authority for an epoch and our samples attribute portions of it**. The unattributed
+remainder is walking we did not observe, computed as `last_pad − attributed` rather
+than inferred. Accumulating our own totals from frame deltas instead would drift
+below the pad by exactly the unobserved amount and never detect it.
 
 ### 5.8 Taper-to-stop, manual and goal-driven (deferred, noted)
 
@@ -753,7 +760,11 @@ submission (`docs/plugin-evidence.md`).
    contend with. Verified live end to end.
 7. How long until the pad sleeps, and whether anything short of physical
    interaction wakes it. Measured: once asleep it stops advertising entirely,
-   so BLE cannot reach it at all.
+   so BLE cannot reach it at all. **Second half, opened 2026-08-26:** how long
+   until it RESETS its cumulative counters, and whether sleep is the trigger. An
+   idle pad has been seen reporting every counter at zero, but the transition was
+   never observed. `docs/smoke-test.md` §4f is the procedure. This bounds, but
+   cannot close, the under-count in `docs/plans/2026-08-26-stats-and-analysis.md` §10.
 
 ---
 
@@ -948,3 +959,61 @@ directly with `FileView`, independently of settings injection
 That example reads shared state owned by the first-party weather widget, not the
 plugin's own private state, so it is a mechanism to study rather than code to
 copy.
+
+### D-6 — The state file exists, outside the plugin directory (2026-08-26)
+
+**Decision.** The plugin owns a private store at
+`${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/`, created at mode `0700`. The
+bridge writes it; a separate short-lived process reads it. This **supersedes D-5's
+"No state file yet" clause and only that clause.** D-5's safety boundary — that the
+widget settings channel carries preferences and never a safety invariant — is
+untouched and still governs.
+
+**What forced it.** D-5 deferred the file until §5.4's adoption design or §5.7's
+daily-totals design actually required it. §5.7 now does
+(`docs/plans/2026-08-26-stats-and-analysis.md`). §5.4 is still unforced: the bridge
+still has no target-address input, so a stored pad address would still have nowhere
+to go. This decision does not close §5.4.
+
+**Why outside the plugin directory, and why `0700`.** Two independent reasons, either
+sufficient:
+
+1. This repository IS the installed plugin, and the shell watches that directory with
+   `inotifywait -m -r -e close_write,create,delete,move` and no `--exclude`. A 1 Hz
+   append inside it would look exactly like the plugin changing and fire a full
+   `reloadPlugins()` every second — the same trap that forced
+   `sys.dont_write_bytecode = True` in `bin/walkingpad-bridge`.
+2. It is personal health data: a record of when its owner is at their desk and
+   moving. `0700` is the floor, and no part of it may ever reach a tracked file.
+
+**Why the bridge writes but does not read.** The poll loop is safety-critical — a
+status frame is the only proof of a live link (D-4), and `IDLE_POLL_INTERVAL_S` is
+already tuned against `Safety.stale_after_s`. Writing is bounded, append-only work.
+Reading is not: aggregating a year of samples is unbounded, and doing it in the
+process that must answer within the staleness gate would trade a safety property for
+a reporting feature. Aggregation therefore lives in `bin/walkingpad-stats`, a
+short-lived child spawned by the UI — consistent with §3.2's "child process, not a
+daemon", and with D-1, since the gap-grouping and residual maths stay in Python where
+pytest reaches them. Parsing in QML was rejected for the same unbounded-work reason,
+on the UI thread instead.
+
+A store write that fails is emitted once as an error and then suppressed. A full disk
+degrades to "no stats" and must never stop the belt controls working.
+
+**Correction to D-5 on `keepLoaded`.** D-5 recorded that `_syncServices()` does not
+reference `keepLoaded`, and that is still true — but it was read at the time as
+meaning the flag was inert for this plugin, which held only while the manifest
+declared `service` and `bar-widget`. The panel loader *does* read it
+(`shell.qml:625`). Adding the `overlay` kind for the analysis window therefore gives
+the flag a real effect it never had: the window mounts permanently instead of on
+first open. That is the wanted behaviour — the window holds no BLE resource, and
+`summon` can then deliver its payload immediately through `deliverIfLoaded` rather
+than racing an asynchronous `Loader`.
+
+**One further consequence of the `overlay` kind, verified before adopting it.**
+`shell.isBarWidgetPanelPlugin()` returns false for a plugin holding `bar-widget` and
+an overlay/panel/menu kind (`shell.qml:426-438`), so `shell.summon/hide/toggle` for
+this plugin id re-routes to the panel loader. `omarchy.menu` is the first-party
+precedent. The documented keybinding path is unaffected: the popup's IPC is
+`IpcHandler { target: "walkingpad" }` (`WalkingpadPanel.qml:189`), a Quickshell IPC
+target independent of the shell's plugin routing.

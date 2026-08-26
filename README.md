@@ -39,6 +39,27 @@ tell us what it was aimed at, and reporting 0.0 there would read as a stop.
 `pad_set_speed` is the pad's own stored value and is diagnostic only — it reads
 0.0 when the speed was set at the panel.
 
+## Private walking history
+
+The plugin keeps a private history under
+`${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/`. The directory is created
+with mode `0700`. This is personal health data — a record of when its owner is at
+their desk and moving — and it never leaves the machine.
+
+Nothing is ever pruned. At one hour of walking a day, growth is roughly 70 MB a
+year, and there is no retention setting. The bar popup draws the current
+session's chart, while a separate analysis window browses the full history.
+
+For direct scripting, `bin/walkingpad-stats` answers queries and prints JSON on
+stdout:
+
+    bin/walkingpad-stats totals --by day
+
+Reported numbers can include an `unobserved` share: walking the pad's own
+counters recorded while the plugin was not connected. That share is always
+shown separately from observed walking, never folded silently into the same
+total.
+
 ## Starting the belt is the dangerous part
 
 ⚠ **The pad starts at ~3.5 km/h regardless of the speed it has stored, and a speed

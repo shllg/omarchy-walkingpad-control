@@ -57,12 +57,13 @@ MAX_CONSECUTIVE_BAD_FRAMES = 10  # spec §8
 
 
 class Bridge:
-    def __init__(self, safety: Safety | None = None, transport=None):
+    def __init__(self, safety: Safety | None = None, transport=None, store=None):
         self.safety = safety or Safety()
         # Built in run(), not here: constructing a Transport opens a system bus
         # connection, and nothing about command handling needs a radio. This is
         # what lets the whole command path be tested with no hardware present.
         self.transport = transport
+        self.store = store
         self.current_speed = 0.0
         # None until we actually command something. The bridge routinely attaches
         # to a belt already running -- started at the panel, or left running by an
@@ -276,6 +277,11 @@ class Bridge:
         # immediately overriding the speed the start had just placed.
         if not self._service_pending_start(status):
             self._service_goal(status)
+        # Store I/O is deliberately last, after status output and both possible
+        # motion writers. A disk stall must never consume fact 12's ~2 s start
+        # window or delay the safety-critical goal service on this frame.
+        if self.store is not None:
+            self.store.record(status, self.commanded_speed, self.goal_speed)
 
     def _service_pending_start(self, status) -> bool:
         """Send a start's intended speed once the belt is actually moving.
@@ -415,8 +421,18 @@ class Bridge:
             self.transport.write(payload)
         except Exception as exc:
             self.emit({"t": "link", "state": "lost", "msg": str(exc)})
+            self.transport.disconnect()
+            self._close_store_bout_after_link_loss()
             return False
         return True
+
+    def _close_store_bout_after_link_loss(self) -> None:
+        # Design §1.4 closes an observed bout on explicit link loss at its last
+        # frame. Every caller emits and tears the radio down first, so bounded
+        # stats I/O cannot delay either the visible state or link teardown; the
+        # Store method owns design §3.1's catch-once-then-disable boundary.
+        if self.store is not None:
+            self.store.close_open_bout()
 
     # -- link --------------------------------------------------------------
     def _service_link(self) -> float:
@@ -467,6 +483,7 @@ class Bridge:
             self.emit({"t": "link", "state": "lost",
                        "msg": "no status frame for %.0fs" % silent_for})
             self.transport.disconnect()
+            self._close_store_bout_after_link_loss()
             return POLL_INTERVAL_S
 
         try:
@@ -474,6 +491,7 @@ class Bridge:
         except Exception as exc:
             self.emit({"t": "link", "state": "lost", "msg": str(exc)})
             self.transport.disconnect()
+            self._close_store_bout_after_link_loss()
             # One prompt reconnect attempt. If the pad has actually gone, find()
             # returns None and the long backoff takes over from there.
             return POLL_INTERVAL_S
@@ -520,4 +538,6 @@ class Bridge:
         try:
             self._loop.run()
         finally:
+            if self.store is not None:
+                self.store.close()
             self.transport.disconnect()
