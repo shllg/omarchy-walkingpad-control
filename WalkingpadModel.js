@@ -96,12 +96,6 @@ function isAdvisory(errorCode) {
   return ADVISORY_CODES.indexOf(errorCode) !== -1
 }
 
-// True when the pad is reachable but will ignore anything we send, so the panel
-// can explain instead of offering controls that quietly do nothing.
-function inert(linkState, mode) {
-  return linkState !== "connected" || mode === "standby"
-}
-
 function elapsedText(totalSeconds) {
   var total = Math.max(0, Number(totalSeconds))
   var hours = Math.floor(total / 3600)
