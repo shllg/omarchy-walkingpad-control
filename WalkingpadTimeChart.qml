@@ -224,9 +224,13 @@ Item {
       var path = []
       for (var i = 0; i < indices.length; ++i) {
         var point = points[indices[i]]
+        // An index with no point cannot be drawn. Charts §3.5 says degenerate
+        // input renders an empty frame and never throws, so that is enforced
+        // here rather than assumed of every caller.
+        if (point === null || point === undefined) continue
         path.push(Qt.point(root.xForTime(point.t), root.yForValue(point.v, range)))
       }
-      paths.push(path)
+      if (path.length >= 2) paths.push(path)
     }
     return paths
   }
@@ -239,9 +243,11 @@ Item {
       if (indices.length < 2) continue
       var first = points[indices[0]]
       var last = points[indices[indices.length - 1]]
+      if (!first || !last) continue
       var path = [Qt.point(root.xForTime(first.t), bottom)]
       for (var i = 0; i < indices.length; ++i) {
         var point = points[indices[i]]
+        if (point === null || point === undefined) continue
         path.push(Qt.point(root.xForTime(point.t), root.yForValue(point.v, range)))
       }
       // Closed at the same evidence boundary as the stroke. Carrying the fill
@@ -291,14 +297,6 @@ Item {
     // let a sparse commanded-speed track disagree with the actual it annotates.
     readonly property var threshold: root.finiteNumber(root.gapSeconds)
       ? root.gapSeconds : root.gapThreshold(chart.points)
-    readonly property var segments: root.segmentsOf(chart.points, chart.threshold)
-    readonly property var overlaySegments: {
-      var result = []
-      for (var i = 0; i < chart.overlaySeries.length; ++i) {
-        result.push(root.segmentsOf(chart.overlaySeries[i].points, chart.threshold))
-      }
-      return result
-    }
 
     // Actual, commanded and goal share km/h, so they share one range too. Fact
     // 2: the gap between commanded and actual IS the measured ~0.25 km/h per
@@ -333,18 +331,34 @@ Item {
       chart.spanStart + 1)
     readonly property real spanSeconds: chart.spanEnd - chart.spanStart
 
-    readonly property var linePaths:
-      root.strokePaths(chart.points, chart.segments, chart.range)
-    readonly property var areaPaths: root.filled
-      ? root.fillPaths(chart.points, chart.segments, chart.range) : []
+    // Each of these derives its segments from the SAME array it then walks, in
+    // one binding. Holding the segments in a property of their own is what
+    // produced 13 TypeErrors on the first live run: `points` and `segments` are
+    // separate bindings over the same input, so during a settle they can be one
+    // revision apart and a stale segment indexes a point that no longer exists.
+    // Recomputing costs one pass and removes the whole class.
+    readonly property var linePaths: {
+      var points = chart.points
+      return root.strokePaths(
+        points, root.segmentsOf(points, chart.threshold), chart.range)
+    }
+    readonly property var areaPaths: {
+      if (!root.filled) return []
+      var points = chart.points
+      return root.fillPaths(
+        points, root.segmentsOf(points, chart.threshold), chart.range)
+    }
     readonly property var overlayPaths: {
       var result = []
-      for (var i = 0; i < chart.overlaySeries.length; ++i) {
+      var series = chart.overlaySeries
+      for (var i = 0; i < series.length; ++i) {
         result.push({
-          paths: root.strokePaths(chart.overlaySeries[i].points,
-                                  chart.overlaySegments[i], chart.range),
-          role: chart.overlaySeries[i].role,
-          dashed: chart.overlaySeries[i].dashed
+          paths: root.strokePaths(
+            series[i].points,
+            root.segmentsOf(series[i].points, chart.threshold),
+            chart.range),
+          role: series[i].role,
+          dashed: series[i].dashed
         })
       }
       return result
