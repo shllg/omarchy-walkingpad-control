@@ -29,6 +29,9 @@ Nothing to install. The bridge runs on system Python and uses only
 `python-gobject` and `bluez`, both already part of an Omarchy base install. There
 is no build step, no virtualenv and no pip.
 
+Nothing here asks for root, installs a package, or writes a service unit. It runs
+entirely as your own user, as a child process of the shell.
+
 ## Installation
 
     omarchy plugin add https://github.com/shllg/omarchy-walkingpad.git
@@ -41,6 +44,21 @@ settings — a bar layout entry is what mounts the widget.
 Installed plugins are git checkouts rather than copied release bundles, so
 `omarchy plugin update` fast-forwards this one in place and re-validates it,
 rolling back if validation fails.
+
+## Removing it
+
+    omarchy plugin remove io.github.shllg.walkingpad
+
+Omarchy asks to confirm, then disables the plugin — which removes its bar layout
+entry — and deletes the checkout. Because this is a git checkout rather than a
+copied folder it is removed outright, with no backup copy; the repository remains
+upstream. The bridge is a child process of the shell, so it exits with the plugin.
+There is no unit to disable and nothing to clean up outside the checkout.
+
+⚠ **Your walking history is deliberately not deleted.** It lives outside the
+plugin, under `${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/`, and removal
+leaves it alone so that reinstalling keeps your history. Delete that directory
+yourself if you want the data gone.
 
 ## Usage
 
@@ -278,8 +296,9 @@ loops back to the start when it reaches the end of the file.
 
     python -m pytest tests/ -v
 
-Needs `pytest`: `sudo pacman -S python-pytest`. It is a development dependency
-only; the plugin itself never needs it.
+Needs the `python-pytest` package from the distribution repositories. It is a
+development dependency only; the plugin itself never needs it, and installing the
+plugin never installs anything.
 
 The protocol codec is tested against real frames captured from a WalkingPad C2 on
 firmware 6.1.2, in `fixtures/`, so the entire suite runs with no hardware present.
@@ -296,6 +315,7 @@ repository. Read it and `docs/design-spec.md` before your first change.
 - `docs/design-spec.md` — architecture, safety model, and decision records
 - `docs/protocol-evidence.md` — what was measured on real hardware, and why
 - `docs/plugin-evidence.md` — the Omarchy loader, manifest and validator contract
+- `docs/release.md` — how a release is tagged, published and re-verified
 - `docs/smoke-test.md` — the hardware checklist, and the open hardware questions
 - `docs/plans/` — the design decisions the code cites by section number
 

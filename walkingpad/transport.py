@@ -5,8 +5,8 @@ BLE plumbing. Knows nothing about WalkingPad semantics -- it moves bytes.
 WHY GIO AND NOT BLEAK
 ---------------------
 An Omarchy plugin has no build step and no dependency field in its manifest, so
-anything not already on the machine becomes a manual `pacman -S` the user has to
-run before the plugin works. `python-gobject` and `bluez` are both in
+anything not already on the machine becomes a package the user has to install by
+hand before the plugin works. `python-gobject` and `bluez` are both in
 omarchy-base.packages, so a Gio/BlueZ transport installs with zero extra steps;
 bleak would not. See ADR D-3.
 

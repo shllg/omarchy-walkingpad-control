@@ -254,10 +254,26 @@ else
   ln -s "$OMARCHY_PATH/shell" "$qml_import_dir/qs"
 
   # Every file must be free of ERRORS. On top of that, a file listed here must
-  # be free of warnings too, and stay that way. The panel and the analysis
-  # window are deliberately absent: they carry long-standing unqualified-access
-  # and missing-property warnings that predate this gate, and clearing those is
-  # its own change. Add a file here once it is clean; never remove one.
+  # be free of warnings too, and stay that way. Add a file here once it is
+  # clean; never remove one.
+  #
+  # The panel and the analysis window are deliberately absent, and this is NOT
+  # deferred debt to pay off later. Their warnings come from the shell's own API
+  # being loosely typed, not from anything this repository can fix: the bar
+  # injects `bar` as a bare QObject, so `bar.shell`, `bar.foreground` and
+  # `bar.fontFamily` cannot resolve statically, and `Style.font` is a nested
+  # untyped object. Measured on 2026-08-26 with the same import path, Omarchy's
+  # OWN first-party widgets score the same way -- media/BarWidget.qml 43+18,
+  # weather/Panel.qml 49+25, tailscale/Panel.qml 35+121 (missing-property +
+  # unqualified) against our 57+35 and 55+49. The residual
+  # `PanelWindow is not creatable` and `QProcess::ExitStatus` warnings are
+  # Quickshell type-registration artifacts and persist with Quickshell.Io
+  # already imported and the handlers taking no parameters.
+  #
+  # Silencing them would mean adding local typed aliases and casts to the two
+  # largest files here purely to satisfy a linter that cannot see the shell's
+  # API. Do not do that, and do not re-litigate it: re-run the comparison above
+  # before concluding these are ours.
   #
   # `-W 0` is deliberately not applied by count elsewhere: qmllint tallies
   # sub-warnings that its "Warning:" summary lines do not show, so a

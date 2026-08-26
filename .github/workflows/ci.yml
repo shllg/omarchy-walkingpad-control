@@ -2,9 +2,33 @@ name: CI
 
 on:
   push:
+    # Both filters are needed. A bare `push:` fires on everything, but adding a
+    # `tags:` filter alone would silently stop CI on branch pushes.
+    branches:
+      - "**"
+    tags:
+      - "v*"
   pull_request:
 
 jobs:
+  # A release tag and manifest.json's version are what the marketplace listing
+  # shows. They drift silently: nothing else reads the manifest version, so a
+  # mismatch is invisible until the listing already says the wrong thing.
+  version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match manifest.json version
+        run: |
+          tag=${GITHUB_REF_NAME#v}
+          manifest=$(jq -r '.version' manifest.json)
+          if [[ $tag != "$manifest" ]]; then
+            echo "tag v$tag does not match manifest.json version $manifest" >&2
+            exit 1
+          fi
+          echo "tag v$tag matches manifest.json version $manifest"
+
   check:
     runs-on: ubuntu-latest
     steps:

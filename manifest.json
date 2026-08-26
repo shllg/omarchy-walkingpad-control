@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.shllg.walkingpad",
   "name": "WalkingPad",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Sascha Hillig (shllg)",
   "license": "MIT",
   "description": "BLE control and status for a KingSmith WalkingPad with no vendor app, account, or network access.",
