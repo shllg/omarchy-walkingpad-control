@@ -31,9 +31,28 @@ plain, and no runtime dependency has appeared.
 
 ## Gate
 
-Require `bin/check-repo` to pass. When QML is present, also require
-`omarchy plugin validate <repo>` and
-`qmllint -I "$OMARCHY_PATH/shell" <file>.qml` for the changed QML files.
+Require `bin/check-repo` to pass; it carries the QML lint. When QML is present,
+also require `omarchy plugin validate <repo>`.
+
+⚠ Do NOT invoke `qmllint` by bare name, and do not point `-I` at the shell
+directory alone. Both are traps that have already made a review report five
+files "clean" that were never checked:
+
+- `/usr/bin/qmllint` is the **Qt 5** binary (`qt5-declarative`). Given Qt 6 QML
+  it exits 255 printing NOTHING, which reads exactly like a pass. The real one
+  is `/usr/lib/qt6/bin/qmllint`.
+- `-I "$OMARCHY_PATH/shell"` does not resolve `qs.Commons` or `qs.Ui`.
+  Quickshell maps the config root to `qs`, so qmllint needs an import path
+  containing a `qs` directory. Without it every `qs.Ui` type is "not found" and
+  the type checking is hollow.
+
+`bin/check-repo` now does this correctly and gates on it, so running it is
+enough. To lint one file by hand:
+
+```
+d=$(mktemp -d) && ln -s "$OMARCHY_PATH/shell" "$d/qs"
+/usr/lib/qt6/bin/qmllint -I "$d" <file>.qml
+```
 
 ## Output
 

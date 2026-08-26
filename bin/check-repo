@@ -220,6 +220,74 @@ else
   fi
 fi
 
+# ⚠ Two traps, both of which cost a review once. First, /usr/bin/qmllint on Arch
+# is the QT5 binary (qt5-declarative); it reads Qt 6 QML, exits 255 with NO
+# output at all, and every file "passes" without being checked. Only
+# /usr/lib/qt6/bin/qmllint is the real one. Second, `-I $OMARCHY_PATH/shell`
+# does NOT resolve `qs.Commons` / `qs.Ui`: quickshell maps the config root to
+# `qs`, so qmllint needs an import path containing a `qs` directory. Without
+# that mapping every qs.Ui type is "not found" and the type checking is hollow.
+qml_files=$(git ls-files '*.qml'; git ls-files -o --exclude-standard '*.qml')
+qml_files=$(printf '%s\n' "$qml_files" | sort -u | sed '/^$/d')
+
+qmllint_bin=""
+for candidate in /usr/lib/qt6/bin/qmllint "${QT6_QMLLINT:-}"; do
+  [[ -n $candidate && -x $candidate ]] || continue
+  if "$candidate" --version 2>&1 | grep -q "qmllint 6"; then
+    qmllint_bin=$candidate
+    break
+  fi
+done
+
+if [[ -z $qml_files ]]; then
+  echo "check qml: SKIP — no QML files are tracked"
+elif [[ -z $qmllint_bin ]]; then
+  # CI runs on ubuntu-latest, where Qt 6 is absent entirely. Skipping on absence
+  # keeps the gate meaningful where it can run without turning CI red where it
+  # cannot -- the same rule the plugin validator above follows.
+  echo "check qml: SKIP — no Qt 6 qmllint (looked for /usr/lib/qt6/bin/qmllint)"
+elif [[ ! -d ${OMARCHY_PATH:-}/shell ]]; then
+  echo "check qml: SKIP — \$OMARCHY_PATH/shell is not present, so qs.* cannot resolve"
+else
+  qml_import_dir=$(mktemp -d)
+  trap 'rm -rf "$plugin_export_dir" "$qml_import_dir"' EXIT
+  ln -s "$OMARCHY_PATH/shell" "$qml_import_dir/qs"
+
+  # Every file must be free of ERRORS. On top of that, a file listed here must
+  # be free of warnings too, and stay that way. The panel and the analysis
+  # window are deliberately absent: they carry long-standing unqualified-access
+  # and missing-property warnings that predate this gate, and clearing those is
+  # its own change. Add a file here once it is clean; never remove one.
+  #
+  # `-W 0` is deliberately not applied by count elsewhere: qmllint tallies
+  # sub-warnings that its "Warning:" summary lines do not show, so a
+  # hand-maintained numeric budget drifts out of agreement with what a reader
+  # counts and fails for reasons nobody can reproduce by eye.
+  qml_must_be_clean() {
+    case ${1##*/} in
+      WalkingpadBarChart.qml|WalkingpadTimeChart.qml) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+
+  qml_failed=0
+  while IFS= read -r qml_file; do
+    [[ -n $qml_file ]] || continue
+    qml_args=(-I "$qml_import_dir")
+    qml_must_be_clean "$qml_file" && qml_args+=(-W 0)
+    if ! qml_output=$("$qmllint_bin" "${qml_args[@]}" "$qml_file" 2>&1); then
+      echo "check qml: FAIL — $qml_file" >&2
+      echo "$qml_output" | grep -E "^(Warning|Error):" | head -20 >&2
+      qml_failed=1
+    fi
+  done <<<"$qml_files"
+
+  if (( qml_failed )); then
+    exit 1
+  fi
+  echo "check qml: PASS"
+fi
+
 if python3 -m pytest tests/ -q; then
   echo "check tests: PASS"
 else

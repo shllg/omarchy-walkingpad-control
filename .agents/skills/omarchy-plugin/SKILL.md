@@ -65,7 +65,11 @@ hardcoded values do not follow the active theme.
 ## Development loop
 
 1. Run `omarchy plugin validate <repo>`.
-2. Run `qmllint -I "$OMARCHY_PATH/shell" <file>.qml` for each QML file.
+2. Lint each QML file. Use `/usr/lib/qt6/bin/qmllint` explicitly -- the bare
+   name resolves to the Qt 5 binary, which exits 255 with no output on Qt 6
+   QML -- and give `-I` a directory containing a `qs` symlink to the shell, or
+   `qs.Commons` and `qs.Ui` silently fail to resolve:
+   `d=$(mktemp -d) && ln -s "$OMARCHY_PATH/shell" "$d/qs"`.
 3. Run `omarchy-shell shell rescanPlugins`.
 4. Use `omarchy-shell shell summon <id> '{}'` and
    `omarchy-shell shell hide <id>` to exercise mounting and teardown.

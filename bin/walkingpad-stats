@@ -144,7 +144,12 @@ def require_type(value, expected, field):
 
 
 def require_number(value, field):
-    if not is_number(value):
+    # Finiteness is part of the type here, not a separate check. json.loads
+    # accepts the Infinity and NaN tokens by default, so a single hand-edited
+    # row could otherwise reach emit()'s allow_nan=False and turn one bad line
+    # into a failed query for the whole period. Rejecting it costs that row and
+    # counts it in skipped_rows, which is what §2.2/§2.3 ask of any torn row.
+    if not is_number(value) or not math.isfinite(value):
         raise ValueError(f"{field} has the wrong type")
 
 
@@ -425,6 +430,13 @@ def sample_files_in_range(store_dir, since, until):
         # result, exactly like a missing bouts.jsonl.
         return []
 
+    # The sample that opens the first bucket's interval may sit just before the
+    # period, and when the period starts at midnight it sits in the PREVIOUS
+    # day's file. Reach back one poll cadence so that file is opened; without it
+    # accumulate_samples has nothing to carry across the boundary and charts §6's
+    # agreement with WalkingpadModel.js breaks again at every day edge.
+    lookback = None if since is None else since - MAX_SAMPLE_INTERVAL_S
+
     files = []
     for name in names:
         if not name.endswith(".jsonl"):
@@ -436,7 +448,7 @@ def sample_files_in_range(store_dir, since, until):
             continue
         day_start = day.replace(tzinfo=timezone.utc).timestamp()
         day_end = day_start + SECONDS_PER_DAY
-        if since is not None and day_end <= since:
+        if lookback is not None and day_end <= lookback:
             continue
         if until is not None and day_start > until:
             continue
@@ -497,9 +509,19 @@ def accumulate_samples(store_dir, since, until, base_bucket_s):
             if not finite(timestamp):
                 skipped_rows[0] += 1
                 continue
-            if since is not None and timestamp < since:
-                continue
             if until is not None and timestamp > until:
+                continue
+            if since is not None and timestamp < since:
+                # Outside the period, so it opens no bucket and does not widen
+                # the axis -- but it DOES open the interval that crosses into
+                # the first bucket, and dropping it costs that bucket one poll's
+                # worth of steps. Charts §6 requires this reader and
+                # WalkingpadModel.js to agree at a bucket boundary, and the JS
+                # keeps the crossing sample; measured before this line moved,
+                # the same minute came out 118 here against 120 there.
+                # accumulate_interval's own cadence guard bounds how far back
+                # this can reach, so no older sample can be joined across.
+                previous = sample
                 continue
 
             first_t = timestamp if first_t is None else min(first_t, timestamp)

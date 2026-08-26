@@ -19,7 +19,16 @@ Panel {
   // So the singleton is looked up by id, which is also what keeps ONE bridge
   // across however many monitors the bar is drawn on (fact 5: the pad accepts
   // exactly one BLE connection).
-  readonly property var service: bar?.shell?.serviceFor("io.github.shllg.walkingpad")
+  //
+  // Written the long way on purpose. `bar?.shell?.serviceFor(...)` reads better
+  // but makes Qt 6.11's qmllint AND qmlformat abort with exit 255 and no
+  // diagnostic at all, which silently costs this file -- the largest QML here --
+  // its static gate. Verified against a two-line probe containing nothing but
+  // optional chaining, so it is the operator, not this expression.
+  readonly property var service: (root.bar && root.bar.shell
+    && typeof root.bar.shell.serviceFor === "function")
+    ? root.bar.shell.serviceFor("io.github.shllg.walkingpad")
+    : null
 
   readonly property string linkState: service ? service.linkState : "error"
   readonly property string beltState: service ? service.beltState : "unknown"

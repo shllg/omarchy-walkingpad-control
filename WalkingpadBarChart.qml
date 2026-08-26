@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 
 // Bucketed bars on a real time axis, drawn as Rectangles.

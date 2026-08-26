@@ -928,6 +928,90 @@ def test_profile_coarsening_a_bucket_matches_accumulating_it_directly(tmp_path):
     assert coarsened["buckets"] == explicit["buckets"]
 
 
+def test_non_finite_numbers_cost_their_own_row_and_nothing_more(tmp_path):
+    # json.loads accepts the Infinity and NaN tokens, so "is a number" is not
+    # enough: one hand-edited row used to reach emit()'s allow_nan=False and
+    # fail the whole period with "Out of range float values are not JSON
+    # compliant". A torn row costs itself, exactly as §2.2/§2.3 require.
+    start = epoch(2026, 8, 26, 9)
+    write_observed_bout(
+        tmp_path, start=start, end=start + 60,
+        dur_s=60, dist_km=0.04, steps=80)
+    with (tmp_path / "bouts.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(
+            '{"e":1,"start":%r,"end":%r,"observed":true,"dur_s":60,'
+            '"dist_km":Infinity,"steps":80,"v_avg":2.5,"v_max":2.6,"n":60}\n'
+            % (start, start + 60))
+    write_sample(tmp_path, "2026-08-26", t=start + 30)
+    append_json(tmp_path / "samples" / "2026-08-26.jsonl", {
+        "t": start + 31, "e": 1, "b": "running", "m": "manual",
+        "v": float("nan"), "c": None, "g": None, "d": 0.1, "s": 10, "pe": 10,
+    })
+
+    for arguments in (("sessions",), ("totals", "--by", "all"), ("profile",)):
+        payload = result_json(run_stats(tmp_path, *arguments))
+
+        assert "error" not in payload, arguments
+        assert payload["skipped_rows"] >= 1, arguments
+
+
+def test_profile_counts_the_delta_that_crosses_into_the_first_bucket(tmp_path):
+    # Charts §6 requires this reader and WalkingpadModel.js to agree at a bucket
+    # boundary, and the JS keeps the sample just before the range so the first
+    # bucket gets the interval that crossed into it. Dropping it here cost that
+    # bucket one poll: the same minute read 118 against the JS reader's 120.
+    start = epoch(2026, 8, 26, 9)
+    write_walk(tmp_path, "2026-08-26", start=start, seconds=120)
+
+    payload = result_json(run_stats(
+        tmp_path, "profile", "--bucket", "60",
+        "--since", "2026-08-26T09:01:00", "--until", "2026-08-26T09:03:00"))
+    drawn = {bucket["t"]: bucket for bucket in payload["buckets"]}
+
+    assert drawn[start + 60]["steps"] == 120
+    # The out-of-range sample opens the interval but must not widen the axis or
+    # create a bucket of its own.
+    assert start not in drawn
+    assert payload["start"] == start + 60
+
+
+def test_profile_reaches_into_the_previous_day_file_for_that_delta(tmp_path):
+    # The crossing sample sits in the PREVIOUS UTC day's file whenever a period
+    # begins at midnight, which is every "Today" query the window makes.
+    midnight = epoch(2026, 8, 26, 0)
+    write_sample(tmp_path, "2026-08-25", t=midnight - 1, b="running",
+                 v=2.5, d=0.70, s=2000, pe=1000)
+    write_sample(tmp_path, "2026-08-26", t=midnight, b="running",
+                 v=2.5, d=0.70, s=2002, pe=1001)
+    write_sample(tmp_path, "2026-08-26", t=midnight + 1, b="running",
+                 v=2.5, d=0.70, s=2004, pe=1002)
+
+    payload = result_json(run_stats(
+        tmp_path, "profile", "--bucket", "60", "--since", "2026-08-26"))
+    drawn = {bucket["t"]: bucket for bucket in payload["buckets"]}
+
+    assert set(drawn) == {midnight}
+    # Two deltas: the one crossing midnight, and the one wholly inside the day.
+    assert drawn[midnight]["steps"] == 4
+    assert drawn[midnight]["dur_s"] == 2
+
+
+def test_profile_still_will_not_join_across_a_hole_at_the_range_edge(tmp_path):
+    # Reaching back for the crossing sample must not become a licence to join
+    # across an absence. The cadence guard still governs.
+    midnight = epoch(2026, 8, 26, 0)
+    write_sample(tmp_path, "2026-08-25", t=midnight - 600, b="running",
+                 v=2.5, d=0.70, s=2000, pe=1000)
+    write_sample(tmp_path, "2026-08-26", t=midnight, b="running",
+                 v=2.5, d=0.98, s=2800, pe=1400)
+
+    payload = result_json(run_stats(
+        tmp_path, "profile", "--bucket", "60", "--since", "2026-08-26"))
+
+    assert payload["buckets"] == [
+        {"t": midnight, "steps": 0, "dist_km": 0.0, "dur_s": 0, "v_avg": 2.5}]
+
+
 def test_profile_buckets_align_to_the_unix_epoch(tmp_path):
     # The convention WalkingpadModel.js repeats for the popup: a bucket starts at
     # floor(t / bucket_s) * bucket_s, so a sample 30 s into a minute lands in the
