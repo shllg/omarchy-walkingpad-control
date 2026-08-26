@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "id": "io.github.shllg.walkingpad",
-  "name": "WalkingPad",
-  "version": "1.0.1",
+  "name": "WalkingPad Control",
+  "version": "1.0.2",
   "author": "Sascha Hillig (shllg)",
   "license": "MIT",
   "description": "BLE control and status for a KingSmith WalkingPad with no vendor app, account, or network access.",
@@ -18,7 +18,7 @@
     "overlay": "WalkingpadWindow.qml"
   },
   "barWidget": {
-    "displayName": "WalkingPad",
+    "displayName": "WalkingPad Control",
     "description": "Bar icon for a KingSmith WalkingPad, with a panel to start, stop and set the speed.",
     "category": "Hardware",
     "allowMultiple": false,

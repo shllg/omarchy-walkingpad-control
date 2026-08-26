@@ -1,4 +1,4 @@
-# omarchy-walkingpad
+# WalkingPad Control
 
 [![CI](https://github.com/shllg/omarchy-walkingpad/actions/workflows/ci.yml/badge.svg)](https://github.com/shllg/omarchy-walkingpad/actions/workflows/ci.yml)
 
