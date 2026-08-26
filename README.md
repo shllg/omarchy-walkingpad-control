@@ -5,6 +5,8 @@
 Control a KingSmith WalkingPad from the Omarchy bar over Bluetooth LE. No vendor
 app, no account, no network access.
 
+![The bar icon and its popup](docs/popup.png)
+
 ## Features
 
 - **A bar icon and popup** that start and stop the belt, step the speed, set an
@@ -19,6 +21,17 @@ app, no account, no network access.
   BLE link and can be scripted on its own.
 
 Everything here runs locally. There is no cloud, no telemetry and no phone-home.
+
+## Another plugin for the same pad
+
+[msegoviadev/omarchy-walkingpad](https://github.com/msegoviadev/omarchy-walkingpad)
+is a different Omarchy plugin for KingSmith pads, and it is good work. It was
+listed shortly before this one, and this one was written without knowledge of it —
+parallel work on the same idea, not either derived from the other.
+
+The emphasis differs. That plugin is built around step tracking and daily targets;
+this one is built around controlling the belt, and treats the safety of doing so as
+the hard part. If belt control is not what you are after, look there instead.
 
 ## Requirements
 
@@ -86,6 +99,8 @@ The left rail selects **Today**, **Week**, **Month** or **All time** and lists t
 sessions in that period. The right pane shows the period's activity profile and
 totals; selecting a session replaces it with that walk's own speed and cadence
 charts.
+
+![The analysis window](docs/analysis.png)
 
 ## Walking history
 

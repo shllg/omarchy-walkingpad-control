@@ -727,16 +727,27 @@ The intended optional values remain:
 
 ```
 omarchy-walkingpad-control/
-  manifest.json          id: io.github.shllg.walkingpad
-                         kinds: [service, bar-widget], keepLoaded: true
-                         barWidget.allowMultiple: false
-  WalkingpadWidget.qml
-  WalkingpadService.qml  service entry point, one object per plugin id
-  bin/walkingpad-bridge
-  walkingpad/{frames,transport,safety,bridge}.py
+  manifest.json            id: io.github.shllg.walkingpad
+                           kinds: [service, bar-widget, overlay], keepLoaded: true
+                           barWidget.allowMultiple: false
+  WalkingpadService.qml    service entry point, one object per plugin id
+  WalkingpadPanel.qml      bar-widget entry point: bar icon and popup
+  WalkingpadWindow.qml     overlay entry point: the analysis window
+  WalkingpadBarChart.qml   steps per bucket
+  WalkingpadTimeChart.qml  speed over time
+  WalkingpadModel.js       pure presentation helpers, no state
+  bin/walkingpad-bridge    the BLE bridge, the only runtime entry point
+  bin/walkingpad-stats     history query tool, JSON on stdout
+  walkingpad/{frames,transport,safety,bridge,store,replay}.py
   fixtures/c2-fw6.1.2.jsonl
+  preview.png              marketplace listing image
   README.md  LICENSE (MIT)
 ```
+
+Also tracked and shipped, but not part of the running plugin: `bin/check-repo`
+(the completion gate), `bin/link-skills` and `bin/plugin-link` (development), the
+`tests/` suite, `docs/`, and `.agents/skills/`. Everything committed here reaches
+a user, because `omarchy plugin add` clones the repository.
 
 The intended id is `io.github.shllg.walkingpad`. A bare `walkingpad` is legal,
 but it squats a generic name in a namespace where ids are permanent.
