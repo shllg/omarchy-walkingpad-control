@@ -1,4 +1,4 @@
-# omarchy-walkingpad
+# WalkingPad Control
 
 An Omarchy bar plugin that controls a KingSmith WalkingPad over BLE, with no vendor
 app, no account, and no network access. Destined for its own marketplace listing.

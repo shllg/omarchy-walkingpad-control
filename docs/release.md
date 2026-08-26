@@ -39,7 +39,7 @@ in deliberate releases rather than continuously.
    mounts from a clean clone:
 
        omarchy plugin remove io.github.shllg.walkingpad
-       omarchy plugin add https://github.com/shllg/omarchy-walkingpad.git
+       omarchy plugin add https://github.com/shllg/omarchy-walkingpad-control.git
 
 3. Confirm `docs/smoke-test.md` §4b and §4c have been signed off for any release
    that changes motion control. Nothing else in this repository can substitute

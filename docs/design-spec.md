@@ -1,4 +1,4 @@
-# omarchy-walkingpad — design spec
+# WalkingPad Control — design spec
 
 Status: implemented · drafted 2026-08-24, last revised 2026-08-26
 Target: standalone Omarchy plugin, own git repo, marketplace submission.
@@ -726,7 +726,7 @@ The intended optional values remain:
 ## 10. Distribution
 
 ```
-omarchy-walkingpad/
+omarchy-walkingpad-control/
   manifest.json          id: io.github.shllg.walkingpad
                          kinds: [service, bar-widget], keepLoaded: true
                          barWidget.allowMultiple: false

@@ -1,6 +1,6 @@
 # WalkingPad Control
 
-[![CI](https://github.com/shllg/omarchy-walkingpad/actions/workflows/ci.yml/badge.svg)](https://github.com/shllg/omarchy-walkingpad/actions/workflows/ci.yml)
+[![CI](https://github.com/shllg/omarchy-walkingpad-control/actions/workflows/ci.yml/badge.svg)](https://github.com/shllg/omarchy-walkingpad-control/actions/workflows/ci.yml)
 
 Control a KingSmith WalkingPad from the Omarchy bar over Bluetooth LE. No vendor
 app, no account, no network access.
@@ -34,11 +34,11 @@ entirely as your own user, as a child process of the shell.
 
 ## Installation
 
-    omarchy plugin add https://github.com/shllg/omarchy-walkingpad.git
+    omarchy plugin add https://github.com/shllg/omarchy-walkingpad-control.git
 
 Omarchy warns that plugin code runs unsandboxed, clones the repository, validates
 the clone, installs it to `~/.config/omarchy/plugins/<id>/`, and offers to enable
-it. Then add the **WalkingPad** widget to the bar from the shell's widget
+it. Then add the **WalkingPad Control** widget to the bar from the shell's widget
 settings — a bar layout entry is what mounts the widget.
 
 Installed plugins are git checkouts rather than copied release bundles, so
@@ -238,8 +238,8 @@ only so that nobody later mistakes it for a missing feature.
 
 ## Development
 
-    git clone git@github.com:shllg/omarchy-walkingpad.git
-    cd omarchy-walkingpad
+    git clone git@github.com:shllg/omarchy-walkingpad-control.git
+    cd omarchy-walkingpad-control
     bin/link-skills
 
 **Run `bin/link-skills` once after cloning.** A fresh clone has no
