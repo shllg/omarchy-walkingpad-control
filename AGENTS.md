@@ -4,11 +4,17 @@ An Omarchy bar plugin that controls a KingSmith WalkingPad over BLE, with no ven
 app, no account, and no network access. Destined for its own marketplace listing.
 
 **Read `docs/design-spec.md` before changing anything.** `docs/protocol-evidence.md`
-records what was measured on real hardware and why. Stage 1 (the bridge) is
-complete — see `docs/plans/2026-08-24-bridge-stage1.md`. Stage 2 is the QML
-plugin: a bar icon plus a popup panel, built on `qs.Ui`'s `Panel` the way every
-first-party popup is. None of the motion controls have run against hardware yet;
-`docs/smoke-test.md` §4b and §4c are the gate before trusting them.
+records what was measured on real hardware and why.
+
+Stages 1 to 3.1 are all shipped: the Python bridge, the QML bar icon and popup
+panel, the durable history store with its query tool, and the analysis window.
+The plans under `docs/plans/` were reduced on 2026-08-26 to the decisions their
+section numbers are cited by and the work that is still open — they are not a
+progress tracker, and completed steps are not kept there.
+
+⚠ **None of the motion controls have been signed off against hardware.**
+`docs/smoke-test.md` §4b and §4c are the gate before trusting them, and that file
+is the live tracker for every open hardware question.
 
 ## Non-obvious facts. Do not re-derive these, and do not "fix" them.
 

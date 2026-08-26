@@ -1,30 +1,24 @@
-# Stats, session charts and analysis window (Stage 3) — design spec
+# Stats, session charts and analysis window (Stage 3) — decisions
 
 **Goal:** Record every value the pad reports, durably and at full resolution, in a
 form that survives the pad's own counter resets; draw the current session in the bar
 popup; and add a screen-centred window for analysing the history.
 
-**Spec:** this file. `docs/design-spec.md` remains canonical for the bridge, the
-safety model and the plugin contract; §5.7 there is replaced by a pointer to this
-document, and a new ADR D-6 supersedes D-5's "no state file yet" clause.
+**Status:** implemented. §4, §5.2 and §6.3 are superseded by
+`docs/plans/2026-08-26-charts-redesign.md`; §8 and §9 described work that is done
+and were removed on 2026-08-26. Section numbers are frozen — 13 of them are cited
+by name from comments in `walkingpad/store.py`, `bin/walkingpad-stats` and the QML,
+so a renumber would orphan those citations.
 
-**Status:** design approved 2026-08-26. No code written. Implementation plan follows
-separately.
+**Spec:** `docs/design-spec.md` remains canonical for the bridge, the safety model
+and the plugin contract. Every measured protocol fact lives in `AGENTS.md`.
 
----
-
-## 0. What is new, and what is deliberately unchanged
-
-New: a persistent store, an attribution model, a query tool, a chart component, and
-an overlay window.
-
-Unchanged, and not to be touched by this work: the poll loop, `Safety`, the start
-sequence, the goal servo, and every measured fact in `AGENTS.md`. **Nothing in this
-document may write to the pad.** Stats are a read-side concern end to end. If an
-implementation step finds itself needing a new command frame, the step is wrong.
+**Unchanged by this work, and not to be touched by it:** the poll loop, `Safety`,
+the start sequence, the goal servo, and every measured fact in `AGENTS.md`.
+**Nothing here writes to the pad.** Stats are a read-side concern end to end; if an
+implementation step needs a new command frame, the step is wrong.
 
 ---
-
 ## 1. The attribution model
 
 This is the core of the design. Everything else is plumbing around it.
@@ -268,76 +262,33 @@ design spec — short-lived child processes, no daemon.
 
 ## 4. `WalkingpadChartStack.qml`
 
-One reusable component, instantiated twice. Rows share one x-axis and **one cursor
-index**, which is what makes the crosshair linked: a single `MouseArea` spans the
-whole stack, maps `mouseX` to a sample index, and every row redraws against that one
-property. Per-row mouse areas would produce N independent cursors that have to be
-kept in sync, which is the bug this avoids by construction.
+⚠ **SUPERSEDED** by charts §3.5, which deletes this component. It was 857 lines
+doing four row types, background bands and cursor handling at once. Replaced by
+`WalkingpadBarChart.qml` and `WalkingpadTimeChart.qml`.
 
-Rows draw on `Canvas`.
-
-### 4.1 Rows
-
-| Row | Kind | Notes |
-|---|---|---|
-| Speed | filled area | commanded speed and goal as thin overlay lines |
-| Cadence | line | derived; see below |
-| Distance | step line | cumulative |
-| Steps | step line | cumulative |
-
-**Speed carries the overlays rather than getting its own rows.** Same unit, and the
-gap between commanded and actual *is* the ~0.25 km/h per second ramp (fact 2).
-Splitting them into separate rows would hide the one thing that chart exists to show.
-
-**Belt state and mode render as a background band** across all rows, not as a row.
-A pause or a standby stretch is then shaded once instead of plotted four times.
-
-**Cadence is derived, not reported.** `Δsteps / Δt × 60`, smoothed over a 10 s
-rolling window. The window is required, not cosmetic: at roughly 1.3 steps/s with
-integer steps at 1 Hz, the raw quotient jumps by ±40 spm between adjacent samples.
-
-**Distance renders as a step line, deliberately.** The pad quantises distance to
-10 m, so at 2.5 km/h it advances once every ~14 s. Interpolating it into a smooth
-line would draw a precision the data does not have.
-
-### 4.2 Colour
-
-The component **owns no colour** and imports neither palette. It takes `fg`, `accent`
-and `muted` as properties, and layers with opacity. Callers supply them:
-
-- popup → `bar.foreground` and friends, as the popup does today
-- window → `Color.menu.text`, `Color.menu.selectedText`, `Color.menu.border`
-
-This is forced, not stylistic: the panel loader injects `service` but **not** `bar`
-(`shell.qml:629-637`), so the window cannot use the bar palette, while the popup
-already does. A component that imported either would be unusable in the other. §5.5
-of the design spec is satisfied in both.
+The one rule from here that survived, and is now charts §3.5: the component owns
+**no colour** and imports neither palette. It takes `fg`, `accent` and `muted` as
+properties, because the panel loader injects `service` but not `bar`
+(`shell.qml:629-637`), so a component importing either palette would be unusable in
+one of its two homes.
 
 ---
 
 ## 5. The popup
 
-`WalkingpadPanel.qml` gains:
+⚠ **§5.2 SUPERSEDED** by charts §1: the popup carries one chart — steps per minute
+on a real wall-clock axis — not a four-row stack.
 
-1. **A ring buffer of samples** in `WalkingpadService.qml`, appended in
-   `handleStatus`, capped at 3600 entries (one hour at 1 Hz). No file access.
-   "Current session" is the tail of that buffer since the last gap longer than
-   `gap_minutes`, computed in JS — cheap on a bounded buffer.
-2. **A compact `WalkingpadChartStack`**, roughly 24 px per row, below the hero and
-   above the existing Distance/Steps/Time pairs. Its cursor is driven by hover *and*
-   by the existing arrow-key navigation, since this panel is keyboard-first
-   (`PanelKeyCatcher`, `moveCursor`).
-3. **An "Analysis" action** in the existing `actions` array, so cursor navigation
-   reaches it. It calls `bar.shell.summon("io.github.shllg.walkingpad")` and then
-   `root.close()`.
+What still holds: the sample ring buffer in `WalkingpadService.qml`, appended in
+`handleStatus` and capped at 3600 entries, with **no file access**. The popup reads
+that buffer and nothing else.
 
-Height is `fittedContentHeight(column.implicitHeight)`, so the panel grows to fit.
-Four rows at 24 px plus an axis is roughly 110 px added to a `Style.space(340)`-wide
-column. If that reads as too tall on hardware, the fix is fewer rows in the popup —
-not a second chart implementation.
+⚠ Corrected 2026-08-26: the popup no longer slices the buffer by `gap_minutes`.
+Charts §1 replaced "the current session" with 60 fixed wall-clock minutes, so
+`computeSessionSamples` and `sessionSamples` were removed rather than left
+recomputing at 1 Hz for a property nothing read.
 
 ---
-
 ## 6. The analysis window
 
 ### 6.1 Mechanism
@@ -388,19 +339,13 @@ on every open. D-6 records the correction.
 
 ### 6.3 Content (v1)
 
-- **Period selector** — day / week / month / all, driving a totals strip.
-- **Totals strip** — distance, steps, time, average speed for the selected period,
-  with the unobserved share shown separately rather than folded in silently.
-- **Session list** — grouped by day, each row showing its bouts, with unobserved
-  bouts visibly distinguished.
-- **Chart stack** — the full four rows for the selected session, tall, with the
-  linked crosshair and range selection.
+⚠ **SUPERSEDED** by charts §2, which restructures the window into a left rail and a
+right pane where exactly one thing is selected at a time.
 
-Explicitly out of scope for v1: calendar heatmap, goals or targets, export, and any
-comparison across sessions.
+Still out of scope, and unchanged: calendar heatmap, goals or targets, export, and
+any comparison across sessions.
 
 ---
-
 ## 7. Configuration
 
 `gap_minutes` (default 5) is the only user-facing knob, exposed through
@@ -410,67 +355,12 @@ Per D-5 that channel carries **preferences only, never safety policy**, and it m
 never arrive at all when no bar widget exists. Both conditions hold here: the gap
 rule is applied at read time, affects presentation only, and has a working default.
 
-Both readers apply it independently: the window passes it to `walkingpad-stats` as
-`--gap`, and the popup applies it in JS to its own ring buffer (§5). The bridge never
-sees it, because nothing it does depends on where a session boundary falls.
+⚠ Corrected 2026-08-26: only the **analysis window** consumes it now, passing it to
+`walkingpad-stats` as `--gap`. The popup used to apply it in JS to its own ring
+buffer; charts §1 removed that. The bridge still never sees it, because nothing it
+does depends on where a session boundary falls.
 
 ---
-
-## 8. Testing
-
-### 8.1 Unit — `tests/test_store.py`
-
-Feed decoded `Status` objects to `store.py` directly, against `tmp_path`:
-
-- counters continue across a stop → two bouts, one epoch, no residual
-- counters reset to zero → epoch increments, `attributed` resets, no negative delta
-- link loss then reconnect with advanced counters → one unobserved bout with exact
-  totals and a `[last_seen_wall, now]` window
-- residual below `MIN_RESIDUAL` → no bout written
-- first-ever frame with high counters → baseline adopted, no bout written
-- restart with an `open_bout` → closed at `last_seen_wall`, not at now
-- `belt` 9/8/7 → samples recorded, bout not yet opened
-- write failure (unwritable store) → one error emitted, bridge keeps running
-
-### 8.2 Unit — `tests/test_stats_query.py`
-
-Gap grouping at boundaries (exactly at the gap, either side of it), totals by period,
-sessions containing unobserved bouts, and an empty store.
-
-### 8.3 Integration and hardware
-
-- **Replay:** tests generate a synthetic fixture into `tmp_path` and run it through
-  `--replay`, asserting the written files. Generated rather than tracked because
-  these cases — a counter reset in particular — have never been captured on hardware,
-  and a tracked fixture would imply otherwise. Generating in `tmp_path` also keeps
-  `tests/test_no_pii.py` out of the picture entirely.
-- **`docs/smoke-test.md` gains §4e**, the first thing to run on hardware: walk one
-  minute, stop twenty seconds, walk one minute, and record whether the counters
-  continue. This upgrades §1.1's operator report to a measured fact, or refutes it.
-  It moves the belt, so it inherits the existing standing-clear requirement.
-- **§4f:** leave the pad idle until it sleeps, wake it, and record whether the
-  counters reset and how long it took. This is open question Q7's counter half.
-- **QML:** no unit harness exists. Verify by hand — the popup chart under a theme
-  with no accent contrast (§5.5), the window opening from the popup button, and both
-  IPC paths from §6.2.
-
----
-
-## 9. Changes to `docs/design-spec.md`
-
-- **§5.7** replaced by a pointer to this document. Its four open questions are all
-  answered here: which figures the bar shows, whether a sparkline is worth it, whether
-  totals are accumulated locally (yes, and the state file now exists), and what the
-  dormant state shows.
-- **New ADR D-6 — the state file exists (2026-08-26).** Supersedes D-5's "no state
-  file yet" clause and only that clause; D-5's safety boundary is untouched and still
-  governs §7 above. Records: what forced it (this design), where it lives, why
-  `0700`, why the bridge writes it and a separate process reads it, and the correction
-  that `keepLoaded` is inert only in the absence of a panel/overlay kind.
-- **§11 open questions:** Q7 gains the counter-reset half, pointing at smoke-test §4f.
-
----
-
 ## 10. Known limitation, recorded rather than papered over
 
 **An unobserved reset under-counts, and no heuristic can fix it.** If the pad resets

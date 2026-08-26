@@ -8,9 +8,10 @@ replace the chart rendering with primitives that look like the rest of the shell
 the storage model, the attribution rules and the query tool's existing contract in
 §1–§3 are untouched and still govern.
 
-**Status:** design approved 2026-08-26 after review of the shipped Stage 3 UI on
-hardware. Nothing here writes to the pad; this remains a read-side concern end to
-end.
+**Status:** implemented 2026-08-26. Section numbers are frozen — 15 of them are
+cited by name from comments in the QML, `WalkingpadModel.js` and
+`bin/walkingpad-stats`, so a renumber would orphan those citations. Nothing here
+writes to the pad; this remains a read-side concern end to end.
 
 ---
 
@@ -270,11 +271,23 @@ relaxed.
 - **Bucketing arithmetic** is in Python precisely so pytest can reach it (ADR D-1).
   The popup's own 60-bucket derivation is the one copy in JS; it must agree with
   the Python at bucket boundaries, and the boundary convention is stated in both.
-- **QML has no unit harness.** Verify by hand: the popup chart during a walk and
-  while idle, the window in both modes, a period containing an unobserved bout, a
-  session with no drawable samples, and the three-zone keyboard path including
-  that Enter does nothing outside the control zone.
-- `bin/check-repo` must stay green, including the real plugin validator.
+  ⚠ They diverged on first implementation — 118 steps against 120 for the same
+  minute, because the query tool dropped the sample that opens the interval
+  crossing into the first bucket. Two tests now pin the agreement, including
+  across a UTC day-file boundary, which is where every "Today" query lands.
+- **QML has no unit harness**, so verification runs through a `qs -p` harness
+  against a synthetic store plus offscreen `qml6` renders. Covered that way:
+  both window modes, period switching, session selection and the return path, a
+  period whose only activity is an unobserved bout, a session with no drawable
+  samples, the three-zone keyboard path including that Enter reaches no belt
+  command outside the control zone, degenerate chart input, and a binding-skew
+  stress that reproduced 8 TypeErrors before the fix and 0 after.
+- **Still by hand, and still open:** the popup chart during a real walk, and both
+  window modes against real accumulated history rather than a synthetic store.
+- `bin/check-repo` must stay green, including the real plugin validator and the
+  QML lint. ⚠ That lint was hollow until 2026-08-26: `/usr/bin/qmllint` is the
+  Qt 5 binary and exits 255 silently on Qt 6 QML, and `-I $OMARCHY_PATH/shell`
+  does not resolve `qs.*`. See the skills for the correct invocation.
 
 ---
 
