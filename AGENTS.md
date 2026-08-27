@@ -151,7 +151,7 @@ parse, command channel and debounce with no radio involved. `pytest` is a dev-on
 bridge itself does not need it.
 
 Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing
-clear. It also carries the open Q2 cold-start procedure.
+clear. It is also the live tracker for every open hardware question.
 
 ## Plugin boundary
 
