@@ -455,6 +455,17 @@ class Bridge:
     def _service_link(self) -> float:
         """Do one unit of link work. Returns seconds until the next tick."""
         if not self.transport.connected:
+            # BlueZ drops the link on its own and Connected goes False without
+            # any path here having torn it down. Measured 2026-08-27: rescanning
+            # straight from this branch left the FE01 notification subscription
+            # registered, and the next subscribe() overwrote its id -- orphaning
+            # it for the life of the process, because only disconnect() ever
+            # unsubscribes. Each orphan makes on_notify run once more per status
+            # frame, and on_notify drives the pending start and the goal servo,
+            # so "at most ONE motion write per status frame" quietly stops
+            # holding. Tearing down first is idempotent when there is nothing to
+            # tear down, and the mute makes these drops frequent.
+            self.transport.disconnect()
             self.emit({"t": "link", "state": "scanning"})
             try:
                 device = self.transport.find(should_continue=self._keep_running)

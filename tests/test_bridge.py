@@ -93,6 +93,7 @@ class FakeTransport:
         self.connected = True
         self.writes = []
         self.disconnects = 0
+        self.live_subscriptions = 0
 
     def find(self, should_continue=None):
         return None
@@ -101,7 +102,7 @@ class FakeTransport:
         pass
 
     def subscribe(self, callback):
-        pass
+        self.live_subscriptions += 1
 
     def write(self, payload):
         self.writes.append(payload)
@@ -109,6 +110,9 @@ class FakeTransport:
     def disconnect(self):
         self.disconnects += 1
         self.connected = False
+        # The real transport unsubscribes here and nowhere else, which is the
+        # whole reason the rescan branch has to come through this method.
+        self.live_subscriptions = 0
 
 
 def test_a_silent_link_is_torn_down_not_shown_as_live():
@@ -123,6 +127,23 @@ def test_a_silent_link_is_torn_down_not_shown_as_live():
     b._service_link()
     assert t.disconnects == 1
     assert t.writes == []
+
+
+def test_a_link_bluez_dropped_is_torn_down_before_the_next_scan():
+    # Measured 2026-08-27. BlueZ drops the link itself, transport.connected goes
+    # False, and no path here has torn anything down. Rescanning from that state
+    # left the notification subscription registered and subscribe() overwrote
+    # its id, orphaning it permanently: every later status frame was then handled
+    # once more per orphan. on_notify drives the pending start and the goal
+    # servo, so that is a duplicated motion write, not merely duplicated output.
+    t = FakeTransport()
+    t.live_subscriptions = 1
+    t.connected = False
+    b = Bridge(transport=t)
+    b.emit = lambda obj: None
+    b._service_link()
+    assert t.disconnects == 1
+    assert t.live_subscriptions == 0
 
 
 def test_a_lost_link_reports_how_long_the_pad_answered():
