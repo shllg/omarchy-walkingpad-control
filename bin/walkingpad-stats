@@ -14,8 +14,10 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import argparse
+import errno
 import json
 import math
+import stat
 from datetime import datetime, timedelta, timezone
 
 
@@ -62,6 +64,40 @@ PROFILE_BASE_BUCKET_S = 60
 MAX_SAMPLE_INTERVAL_S = 3.0
 
 SECONDS_PER_DAY = 86400.0
+
+# state.json is a handful of scalars. Only that file is capped; the sample and
+# bout files are streamed by iter_jsonl precisely because they are unbounded.
+MAX_STATE_BYTES = 1 << 20
+READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+class LeafError(OSError):
+    """A predictable path inside the store is not the regular file it must be."""
+
+
+def open_leaf(path):
+    """Open a store file without following a symlink at the final component.
+
+    Mirrored from store.py rather than imported, for the same reason as
+    MAX_SAMPLE_INTERVAL_S above: this reader must stay startable without the
+    bridge's own modules. O_NOFOLLOW refuses a symlink; O_NONBLOCK keeps a FIFO
+    from blocking before the S_ISREG check can reject it. A FIFO here would
+    hang the analysis window's query rather than the bridge, but it would hang
+    just as completely, and no query may wait on a writer that never comes.
+    """
+    try:
+        fd = os.open(path, READ_FLAGS)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise LeafError(f"refusing non-regular file: {path}") from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise LeafError(f"refusing non-regular file: {path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def finite_nonnegative_float(value):
@@ -195,11 +231,17 @@ def iter_jsonl(path, validator, skipped_rows):
     not reachable from an ordinary `for`.
     """
     try:
-        stream = open(path, "r", encoding="utf-8")
+        fd = open_leaf(path)
     except FileNotFoundError:
         return
+    except OSError:
+        # A symlink, FIFO or otherwise unopenable file costs the whole file
+        # rather than one row, so it is counted the way a torn row is: "empty"
+        # must stay distinguishable from "this file could not be read at all".
+        skipped_rows[0] += 1
+        return
 
-    with stream:
+    with os.fdopen(fd, "r", encoding="utf-8") as stream:
         for line in stream:
             try:
                 row = json.loads(line)
@@ -691,13 +733,23 @@ def validate_counter(counter, field):
 def query_residuals(args):
     path = os.path.join(args.store, "state.json")
     try:
-        with open(path, "r", encoding="utf-8") as stream:
-            state = json.load(stream)
+        fd = open_leaf(path)
     except FileNotFoundError:
         # A store with no state yet is a normal first-run result, not a failed
         # query. The explicit Stage 3 §2.4 status separates that absence from
         # both authoritative zeros and a cache that exists but cannot be trusted.
         return zero_residuals("not_found")
+    except OSError:
+        # A symlink or FIFO at this path is exactly "exists but cannot be
+        # trusted", which is what the unreadable status already means.
+        return zero_residuals("unreadable")
+
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            raw = stream.read(MAX_STATE_BYTES + 1)
+        if len(raw) > MAX_STATE_BYTES:
+            raise ValueError("state.json is larger than this module writes")
+        state = json.loads(raw)
     except Exception:
         return zero_residuals("unreadable")
 

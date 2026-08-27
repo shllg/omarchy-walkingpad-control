@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import stat
 import time
 
@@ -8,6 +9,7 @@ from walkingpad.frames import Status
 from walkingpad.store import (
     DEFAULT_STORE_DIR,
     LINK_GAP_S,
+    MAX_STATE_BYTES,
     Store,
     TAIL_S,
     resolve_store_path,
@@ -718,3 +720,171 @@ def test_store_refuses_symlink_root_and_samples_without_chmodding_targets(tmp_pa
     assert len(samples_emitted) == 1
     assert "refusing symlink samples directory" in samples_emitted[0]["msg"]
     assert stat.S_IMODE(redirected_samples.stat().st_mode) == 0o755
+
+
+# The store root is 0700 and _prepare_directory refuses a symlinked directory,
+# so these leaves are only reachable by something that already sits inside the
+# tree. They are covered anyway because the same open() that a symlink would
+# redirect is the one that must not block: Store is constructed at
+# bin/walkingpad-bridge:56, before bridge.run(), and plan §3.1 requires a
+# filesystem problem to degrade to "no stats" rather than strand belt control.
+
+
+def test_store_refuses_a_symlinked_state_file(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir(mode=0o700)
+    decoy = tmp_path / "decoy.json"
+    decoy.write_text(json.dumps({"epoch": 41}), encoding="utf-8")
+    (root / "state.json").symlink_to(decoy)
+    emitted = []
+
+    store = Store(root, emit=emitted.append, now=FakeClock())
+
+    assert store._disabled is True
+    assert store.epoch == 0
+    assert len(emitted) == 1
+    assert emitted[0]["code"] == "store_write_failed"
+    assert "refusing non-regular file" in emitted[0]["msg"]
+    assert json.loads(decoy.read_text(encoding="utf-8")) == {"epoch": 41}
+
+
+def test_store_does_not_block_on_a_fifo_state_file(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir(mode=0o700)
+    os.mkfifo(root / "state.json", 0o600)
+    emitted = []
+
+    def bail(signum, frame):
+        raise AssertionError(
+            "Store blocked opening a FIFO at state.json. A blocked open() "
+            "raises nothing, so the constructor's own error boundary cannot "
+            "catch it and the bridge never reaches bridge.run()."
+        )
+
+    previous = signal.signal(signal.SIGALRM, bail)
+    signal.alarm(5)
+    try:
+        store = Store(root, emit=emitted.append, now=FakeClock())
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    assert store._disabled is True
+    assert len(emitted) == 1
+    assert "refusing non-regular file" in emitted[0]["msg"]
+
+
+def test_oversized_state_file_starts_fresh_without_disabling(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir(mode=0o700)
+    # Valid JSON that an unbounded read would have parsed, so the assertion
+    # below can only pass if the size bound rejected it before json saw it.
+    (root / "state.json").write_text(
+        json.dumps({"epoch": 41, "last_pad": {"steps": 5}})
+        + " " * (MAX_STATE_BYTES + 1),
+        encoding="utf-8",
+    )
+    emitted = []
+
+    store = Store(root, emit=emitted.append, now=FakeClock())
+
+    # Oversized is corruption, not tampering: the next atomic write heals it,
+    # so it must not spend this module's single error emission.
+    assert store._disabled is False
+    assert emitted == []
+    assert store.epoch == 0
+    assert store.last_pad is None
+
+
+def test_store_refuses_a_symlinked_bouts_file(tmp_path):
+    root = tmp_path / "store"
+    decoy = tmp_path / "decoy.jsonl"
+    emitted = []
+    clock = FakeClock()
+    store = Store(root, emit=emitted.append, now=clock)
+    (root / "bouts.jsonl").symlink_to(decoy)
+
+    # A bout is only appended once the pad's own counters have advanced, so
+    # two running frames and a stop are what reach _write_bout at all.
+    store.record(
+        make_status("running", 2.0, elapsed_s=100, distance_km=1.00, steps=200),
+        None, None,
+    )
+    clock.advance(1)
+    store.record(
+        make_status("running", 2.1, elapsed_s=101, distance_km=1.01, steps=202),
+        None, None,
+    )
+    clock.advance(1)
+    store.record(
+        make_status("stopped", 0.0, elapsed_s=103, distance_km=1.03, steps=206),
+        None, None,
+    )
+
+    assert store._disabled is True
+    assert not decoy.exists()
+    assert len(emitted) == 1
+    assert "refusing non-regular file" in emitted[0]["msg"]
+
+
+def test_store_refuses_a_symlinked_sample_file(tmp_path):
+    clock = FakeClock()
+    root = tmp_path / "store"
+    decoy = tmp_path / "decoy.jsonl"
+    emitted = []
+    store = Store(root, emit=emitted.append, now=clock)
+    date = time.strftime("%Y-%m-%d", time.gmtime(clock.wall))
+    (root / "samples" / f"{date}.jsonl").symlink_to(decoy)
+
+    store.record(make_status("running", 2.0), None, None)
+
+    assert store._disabled is True
+    assert not decoy.exists()
+    assert len(emitted) == 1
+    assert "refusing non-regular file" in emitted[0]["msg"]
+
+
+def test_state_rewrite_uses_an_unpredictable_temp_and_strands_none(tmp_path):
+    root = tmp_path / "store"
+    decoy = tmp_path / "decoy.json"
+    store = Store(root, now=FakeClock())
+    # The name _write_state used before mkstemp. Nothing may open it.
+    (root / "state.json.tmp").symlink_to(decoy)
+
+    store.record(make_status("running", 2.0), None, None)
+    store.close()
+
+    assert store._disabled is False
+    assert not decoy.exists()
+    assert (root / "state.json.tmp").is_symlink()
+    # The planted symlink is the only .tmp entry, so no mkstemp temporary was
+    # left behind either; _write_state runs for the life of the bridge.
+    assert sorted(p.name for p in root.glob("*.tmp")) == ["state.json.tmp"]
+    assert json.loads(
+        (root / "state.json").read_text(encoding="utf-8")
+    )["last_pad"] is not None
+
+
+def test_unreadable_state_file_starts_fresh_without_disabling(tmp_path):
+    if os.geteuid() == 0:
+        # root ignores the mode bits, so the case under test cannot arise.
+        return
+    root = tmp_path / "store"
+    root.mkdir(mode=0o700)
+    state = root / "state.json"
+    state.write_text(json.dumps({"epoch": 41}), encoding="utf-8")
+    os.chmod(state, 0o000)
+    emitted = []
+
+    try:
+        store = Store(root, emit=emitted.append, now=FakeClock())
+    finally:
+        os.chmod(state, 0o600)
+
+    # Unreadable is not tampering. This was the behaviour before the leaf
+    # checks existed and must survive them: os.replace can still heal the file
+    # without read permission, so the store stays enabled and stays quiet.
+    assert store._disabled is False
+    assert emitted == []
+    assert store.epoch == 0
+

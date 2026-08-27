@@ -28,13 +28,16 @@ def epoch(year, month, day, hour=0, minute=0, second=0):
     ).timestamp()
 
 
-def run_stats(store_dir, *arguments):
+def run_stats(store_dir, *arguments, timeout=None):
+    # timeout stays None by default so ordinary cases keep waiting as long as
+    # they need; the cases that assert "does not block" pass one explicitly.
     return subprocess.run(
         [sys.executable, STATS, *arguments, "--store", str(store_dir)],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
         env={**os.environ, "TZ": "UTC"},
+        timeout=timeout,
     )
 
 
@@ -1022,3 +1025,77 @@ def test_profile_buckets_align_to_the_unix_epoch(tmp_path):
     payload = result_json(run_stats(tmp_path, "profile", "--bucket", "60"))
 
     assert payload["buckets"][0]["t"] == epoch(2026, 8, 26, 9)
+
+
+# This reader opens the same predictable names the bridge writes. A FIFO here
+# hangs the analysis window's query rather than belt control, but it hangs just
+# as completely, and a symlink redirects the read to a file nobody asked for.
+
+
+def test_residuals_refuse_a_symlinked_state_file(tmp_path):
+    decoy = tmp_path / "decoy.json"
+    decoy.write_text(
+        json.dumps({
+            "epoch": 41,
+            "last_pad": {"elapsed_s": 9, "dist_km": 9.0, "steps": 9},
+            "attributed": {"elapsed_s": 0, "dist_km": 0.0, "steps": 0},
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "state.json").symlink_to(decoy)
+
+    result = run_stats(tmp_path, "residuals")
+
+    # Valid state the old code would have parsed and reported as real walking.
+    assert result_json(result) == zero_residuals("unreadable")
+
+
+def test_residuals_do_not_block_on_a_fifo_state_file(tmp_path):
+    os.mkfifo(tmp_path / "state.json", 0o600)
+
+    result = run_stats(tmp_path, "residuals", timeout=30)
+
+    assert result_json(result) == zero_residuals("unreadable")
+
+
+def test_residuals_reject_an_oversized_state_file(tmp_path):
+    # Valid JSON, so only the size bound can reject it.
+    (tmp_path / "state.json").write_text(
+        json.dumps({
+            "epoch": 1,
+            "last_pad": {"elapsed_s": 1, "dist_km": 1.0, "steps": 1},
+            "attributed": {"elapsed_s": 0, "dist_km": 0.0, "steps": 0},
+        }) + " " * ((1 << 20) + 1),
+        encoding="utf-8",
+    )
+
+    result = run_stats(tmp_path, "residuals")
+
+    assert result_json(result) == zero_residuals("unreadable")
+
+
+def test_a_symlinked_bouts_file_is_counted_as_skipped_not_read(tmp_path):
+    decoy = tmp_path / "decoy.jsonl"
+    append_json(decoy, {
+        "e": 1, "start": epoch(2026, 3, 1, 8), "end": epoch(2026, 3, 1, 9),
+        "observed": True, "dur_s": 3600, "dist_km": 4.0, "steps": 6000,
+        "v_avg": 4.0, "v_max": 4.5, "n": 3600,
+    })
+    (tmp_path / "bouts.jsonl").symlink_to(decoy)
+
+    payload = result_json(run_stats(tmp_path, "sessions"))
+
+    # A whole refused file costs the file, and says so through the same counter
+    # a torn row uses, so "empty" stays distinguishable from "unreadable".
+    assert payload["sessions"] == []
+    assert payload["skipped_rows"] == 1
+
+
+def test_sessions_do_not_block_on_a_fifo_bouts_file(tmp_path):
+    os.mkfifo(tmp_path / "bouts.jsonl", 0o600)
+
+    payload = result_json(run_stats(tmp_path, "sessions", timeout=30))
+
+    assert payload["sessions"] == []
+    assert payload["skipped_rows"] == 1
+

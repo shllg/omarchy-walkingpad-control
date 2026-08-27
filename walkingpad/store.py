@@ -10,8 +10,11 @@ bout. A delta too small or too uncertain to place stays in ``last_pad -
 attributed``; advancing both counters without a bout would make real walking
 vanish from both history and the residual.
 """
+import errno
 import json
 import os
+import stat
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +37,53 @@ STATE_WRITE_INTERVAL_S = 10.0
 # but remain local so this arithmetic-only module does not import BLE policy.
 MAX_POLL_INTERVAL_S = 2.0
 LINK_GAP_S = 15.0
+
+# state.json holds five small scalars plus one open bout -- a few hundred bytes
+# in practice. The cap exists so a corrupt or pre-planted file cannot turn the
+# constructor's read into the unbounded work plan §3.1 forbids the writer.
+MAX_STATE_BYTES = 1 << 20
+
+# _prepare_directory refuses a symlinked store root and samples directory, but
+# that says nothing about the predictable leaf names inside them. O_NOFOLLOW
+# refuses a symlink at the final component; O_NONBLOCK keeps a FIFO from
+# blocking the call before the S_ISREG check below can reject it. Regular files
+# ignore O_NONBLOCK on Linux, so the flag costs nothing once the check passes.
+_APPEND_FLAGS = (
+    os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+)
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+
+class StoreLeafError(OSError):
+    """A predictable path inside the store is not the regular file it must be.
+
+    Redirecting an append into another user's file, and handing the constructor
+    a FIFO it would block on forever, both need the answer plan §3.1 gives a
+    full disk: degrade the whole store once and leave belt control alone. The
+    blocking case is why this cannot be left to the caller's try/except -- a
+    blocked open() raises nothing, and Store is built before bridge.run().
+    """
+
+
+def _open_leaf(path, flags):
+    """Open a leaf inside the store, refusing anything but a regular file."""
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        # ELOOP is O_NOFOLLOW meeting a symlink; ENXIO is O_WRONLY|O_NONBLOCK
+        # meeting a FIFO with no reader. Both mean the leaf was replaced.
+        if exc.errno in (errno.ELOOP, errno.ENXIO):
+            raise StoreLeafError(
+                f"refusing non-regular file: {path}"
+            ) from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise StoreLeafError(f"refusing non-regular file: {path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 class Store:
@@ -86,13 +136,31 @@ class Store:
         os.chmod(path, 0o700)
 
     def _load_state(self):
-        if not self._state_path.exists():
-            # A fresh store is the normal first-run state, not an error.
+        try:
+            fd = _open_leaf(self._state_path, _READ_FLAGS)
+        except StoreLeafError:
+            # Tampering, not corruption: escape to the constructor's _fail.
+            raise
+        except OSError:
+            # A missing file is the normal first run, and anything else
+            # unreadable is corruption the next atomic write heals, exactly as
+            # before. Opening and catching beats an exists() check, which left
+            # a window for the path to change underneath the open.
             return
         try:
-            with open(self._state_path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
+            with os.fdopen(fd, "rb") as fh:
+                # One byte past the cap separates "exactly at the limit" from
+                # "truncated by it" without reading whatever follows.
+                raw = fh.read(MAX_STATE_BYTES + 1)
+        except OSError:
+            return
+        if len(raw) > MAX_STATE_BYTES:
+            # Too large to be state this module wrote. Treated as corrupt
+            # rather than parsed, so json never sees the unbounded input.
+            return
+        try:
+            data = json.loads(raw)
+        except ValueError:
             # A corrupt state file is distinct from the write failure named by
             # this module's only error code. Starting fresh lets the next
             # successful atomic write heal it without a misleading emission.
@@ -387,7 +455,9 @@ class Store:
     def _write_bout(self, row, state_wall):
         # Append + flush is the bounded durability point from design §3.1.
         # fsync per 1 Hz row would add wear without preserving unique evidence.
-        with open(self._bouts_path, "a", encoding="utf-8") as fh:
+        with os.fdopen(
+            _open_leaf(self._bouts_path, _APPEND_FLAGS), "a", encoding="utf-8"
+        ) as fh:
             fh.write(json.dumps(row) + "\n")
             fh.flush()
         # This forced state rewrite starts immediately after every bout append,
@@ -419,7 +489,9 @@ class Store:
             wall, tz=timezone.utc
         ).strftime("%Y-%m-%d")
         path = self._samples_dir / f"{date}.jsonl"
-        with open(path, "a", encoding="utf-8") as fh:
+        with os.fdopen(
+            _open_leaf(path, _APPEND_FLAGS), "a", encoding="utf-8"
+        ) as fh:
             fh.write(json.dumps(row) + "\n")
             fh.flush()
 
@@ -439,11 +511,28 @@ class Store:
             "open_bout": self.open_bout,
             "last_seen_wall": self.last_seen_wall,
         }
-        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-            fh.flush()
-        os.replace(tmp, self._state_path)
+        # mkstemp creates an unpredictable name with O_EXCL and mode 0600 and
+        # hands back the open descriptor, so there is no window in which the
+        # path exists unopened for a symlink to occupy. The fixed
+        # "state.json.tmp" this replaced was predictable and followed.
+        fd, tmp = tempfile.mkstemp(
+            dir=self._root, prefix="state.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh)
+                fh.flush()
+            # rename replaces a symlink at the destination rather than writing
+            # through it, so the state path heals itself on the next write.
+            os.replace(tmp, self._state_path)
+        except BaseException:
+            # A failed rewrite must not strand a temp file. This runs up to
+            # every STATE_WRITE_INTERVAL_S for the life of the bridge.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         self._last_state_write = wall
 
     def close(self):
