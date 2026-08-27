@@ -171,22 +171,26 @@ so the shell's own bridge releases the link — only one BLE connection to the p
 exists at a time (fact 5). Re-enable it afterwards; `disable` removes the bar
 placement, so back up `~/.config/omarchy/shell.json` before and restore it after.
 
-⚠⚠ **Gate: the link must hold for 60 unbroken seconds before you send anything.**
-Watch stdout with no commands at all and confirm no `{"t":"link","state":"lost"}`
-appears for a full minute. **Do not start the belt until it does.**
+⚠⚠ **Gate: send the start inside the answered window.** This pad has been
+measured stopping its replies 29.2 s after a connection while still acknowledging
+every packet on the radio (`docs/protocol-evidence.md`, "The pad stops ANSWERING
+at 29.2 s"). Wait for `{"t":"link","state":"connected"}` and its first status
+frame, then send the start **immediately** — within a few seconds, not thirty.
 
-This is not ceremony. On 2026-08-27 the link was being cut off every ~29 s, the
-start command landed one second before a cut-off, and the belt ended up at the
-pad's own ~3.5 km/h with the follow-up speed never sent — which is exactly what
-this procedure's failure branch describes, produced by something that has nothing
-to do with the start sequencing. **A start into an unstable link is
-indistinguishable, at the belt, from a start whose speed the pad ignored**, so
-without this gate a failing run cannot be told from a broken feature. The full
-observation is in `docs/protocol-evidence.md`, "Link cut off every ~29 s".
+A start sent late lands in a pad that has gone mute, the belt never reports
+`running` inside `START_SPEED_WINDOW_S`, `start_unconfirmed` fires, and no speed
+is ever sent. The belt then settles at the pad's own ~3.5 km/h, which is exactly
+what this procedure's failure branch describes — **produced by something that has
+nothing to do with the start sequencing.** A start into a muted pad is
+indistinguishable, at the belt, from a start whose speed the pad ignored.
 
-If the gate fails, this run is **inconclusive — not a failure**. Record it as
-inconclusive, stop, and fix the link first. Do not widen
-`START_SPEED_WINDOW_S` to make it pass.
+⚠ An earlier version of this gate demanded "60 unbroken seconds of link" before
+starting. That can never pass against a 29.2 s window, so it would have blocked
+§4b permanently. It is retracted; the rule above replaces it.
+
+If the belt never reports `running`, this run is **inconclusive — not a failure**.
+Record it as inconclusive and check when the start landed relative to the
+connection. Do not widen `START_SPEED_WINDOW_S` to make it pass.
 
 **Procedure.**
 
@@ -210,12 +214,34 @@ inconclusive, stop, and fix the link first. Do not widen
 
 **Runs so far.**
 
-- **2026-08-27 — INCONCLUSIVE. §4b is still unsigned.** The link was being cut
-  off every ~29 s that day. The start landed one second before a cut-off, the
-  belt never reported `running` inside the 8 s window, `start_unconfirmed` fired,
-  no speed was sent, and the belt settled at the pad's own ~3.5 km/h. The
-  sequencing was never exercised, so this says nothing about it either way. The
-  link gate above was added because of this run.
+- **2026-08-27 16:22, 16:26 and 16:33 — ✅ PASSED, three times. §4b IS SIGNED
+  OFF.** Each start was sent on the first status frame of a fresh connection, per
+  the gate above.
+
+  | run | command sent | first `running` | countdown | settled at |
+  |---|---|---|---|---|
+  | 1 | 16:22:19.853 | 16:22:23.870 | 4.00 s | **2.0** |
+  | 2 (restart, §4e) | 16:26:26.860 | 16:26:30.889 | 4.03 s | **2.0** |
+  | 3 (after §4d) | 16:33:49.755 | 16:33:53.750 | 4.00 s | **2.0** |
+
+  The belt settled at the commanded 2.0 km/h every time, never at the pad's own
+  ~3.5. Run 1 caught the pad already at 2.5 km/h 70 ms after its first `running`
+  frame, climbing toward 3.5, and the follow-up pulled it back to 2.0 — fact 12's
+  window is real, narrow, and handled. `pad_set_speed` flipped to the commanded
+  value on the same frame the follow-up landed, which is the byte [14] evidence
+  that the speed was accepted.
+
+  **`START_SPEED_WINDOW_S = 8.0` is confirmed adequate**: 4.0 s of countdown, with
+  the same value three times. The 15 s used by `walkingpad-controller` is not
+  needed here. Do not widen it.
+
+  Run 3 was the §4d closing re-run and is the evidence that a goal does not
+  disturb the start: `goal` stayed `null` across the whole sequence.
+
+- **2026-08-27 14:40 — INCONCLUSIVE, superseded by the runs above.** The start
+  landed at the end of an answered window, `start_unconfirmed` fired, no speed was
+  sent, and the belt settled at ~3.5 km/h with the sequencing never exercised.
+  This is what the gate above now prevents.
 
 **Then stop the belt from the panel, not over BLE**, and record whether the
 status stream follows the transition. Use the BLE stop only in §3, where its
@@ -279,6 +305,38 @@ Belt running at a known speed, started per §4b.
 **Then re-run §4b once** to confirm the goal has not disturbed the two-part
 start: a goal must never write in the same status frame a start's speed lands.
 
+**Runs so far.**
+
+- **2026-08-27 16:29–16:33 — ✅ STEPS 1 TO 5 PASSED, bridge-side. Step 6 is still
+  open**, because it is a colour check that belongs with §4c.
+
+  1. **It converges.** Belt steady at 2.0, goal 2.5 set at 16:29:44.863. One write
+     at 16:29:45.921, belt 2.0 → 2.3 → 2.5 by 16:29:47.877 — **2.0 s**, as
+     specified.
+  2. **The cap holds.** Five goals sent back to back (3.0, 3.5, 4.0, 4.5, 5.0)
+     with the belt actually at 2.5. The goal settled at **3.5 — actual + 1.0**,
+     not 5.0. Bound 1 holds. The servo then walked the belt one clamped step per
+     status frame: `target` 3.0 → 3.2 → 3.5, no step above 0.5.
+  3. **It reverses.** Goal 4.5 with the belt climbing 3.5 → 3.7 → 4.2; two `-0.5`
+     presses set the goal to **3.5**, coalesced to the last intention rather than
+     queued as 4.0 then 3.5. The belt turned around at 4.2 and came back down
+     without finishing the old climb.
+  4. **It stops on arrival.** `goal` went `null` on the arrival frame and **no
+     further speed frame was written for 20 s** while the belt held 2.5. Bound 4
+     holds; the servo does not hammer the pad at a reached goal.
+  5. **Stop cancels it.** ⚠ The critical one. Goal 4.5, belt converging through
+     3.7 with `target` 4.2, stop sent at 16:32:35.443. On the very next frame
+     `goal` was `null` and `target` 0.0; the belt coasted 4.1 → 2.5 → 0.7 → 0.0
+     and **stayed stopped for 37 s and across a full reconnect.** The goal did not
+     survive the stop.
+
+  The closing §4b re-run passed as run 3 in §4b above, with `goal` `null`
+  throughout: no goal write collided with the frame the start's speed landed on.
+
+  Also observed, confirming fact 15: `pad_set_speed` stayed at 4.2 while the belt
+  was stopped, because byte [14] is the last BLE-commanded speed and never a
+  target.
+
 ## 4e. Counters across a stop — stand clear of the belt
 
 Run this first on hardware for Stage 3. The store's attribution model rests on
@@ -330,12 +388,28 @@ store without any additional flag:
 
 **Runs so far.**
 
-- **2026-08-27 — HALF ANSWERED. Still unsigned.** `time` 65, `dist_km` 0.05 and
-  `steps` 90 held identical across a panel stop and three reconnects, so the
-  counters survive a stop *in place*. The decisive half is untouched: the belt was
-  never restarted, so whether they **continue climbing from 65** or drop toward
-  zero is still unknown, and that is the half the attribution model rests on. The
-  §4b link gate applies here too — this procedure starts the belt.
+- **2026-08-27 16:25–16:27 — ✅ ANSWERED. THE COUNTERS SURVIVE A STOP AND CONTINUE.**
+
+  | moment | `time` | `dist_km` | `steps` |
+  |---|---|---|---|
+  | immediately before the stop | 169 | 0.09 | 188 |
+  | belt stopped, across a reconnect | 171 | 0.09 | 188 |
+  | first `running` frame after restart | 171 | 0.09 | 188 |
+  | one minute later | 290 | 0.15 | 321 |
+
+  They resumed from where they were and kept climbing. They did **not** drop
+  toward zero. **The attribution model in stats design §1.1 is sound as designed**,
+  and `residual = last_pad − attributed` remains meaningful across a stop. The
+  2026-08-25 operator report is now a measured fact.
+
+  The stop was sent over BLE, not the panel, so this run also exercised
+  `Safety.may_stop()` in the permitting direction on a live running frame: belt
+  ramped 2.0 → 1.1 → 0.4 → 0.2 → 0.0. Note `belt` reads `stopped` while `speed`
+  is still coasting at 0.4 — the state flips before the belt physically halts.
+
+- **2026-08-27 earlier — half answered, superseded.** `time` 65, `dist_km` 0.05,
+  `steps` 90 held across a panel stop and three reconnects, but the belt was never
+  restarted.
 
 ## 4f. The sleep boundary's counter half
 

@@ -789,6 +789,19 @@ submission (`docs/plugin-evidence.md`).
    stacks. Dropping bleak for Gio (ADR D-3) means the bridge is a BlueZ D-Bus
    client like every other client on the desktop, so there is no second stack to
    contend with. Verified live end to end.
+9. ⚠ **Why the pad answered indefinitely on 2026-08-26 and mutes at 29.2 s on
+   2026-08-27.** Opened 2026-08-27. Measured with `btmon`: the pad stops replying
+   to status queries 29.2 s after a connection — twelve consecutive cycles within
+   a tenth of a second of each other, belt running or stopped alike — while its
+   radio keeps acknowledging every packet we send. The link is healthy; only the
+   application goes quiet. Yet `bouts.jsonl` holds an unbroken 1988 s bout from
+   the previous day on the same pad, firmware and code. Range and interference are
+   ruled out by the trace. The trigger is unknown.
+   `docs/protocol-evidence.md`, "The pad stops ANSWERING at 29.2 s", is the record.
+   Until this is understood, **the D-4 watchdog and reconnect are what make the
+   plugin usable at all**, and any procedure that sends a command must send it
+   early in a fresh connection.
+
 7. How long until the pad sleeps, and whether anything short of physical
    interaction wakes it. Measured: once asleep it stops advertising entirely,
    so BLE cannot reach it at all. **Second half, opened 2026-08-26:** how long

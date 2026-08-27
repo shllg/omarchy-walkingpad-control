@@ -12,9 +12,10 @@ The plans under `docs/plans/` were reduced on 2026-08-26 to the decisions their
 section numbers are cited by and the work that is still open — they are not a
 progress tracker, and completed steps are not kept there.
 
-⚠ **None of the motion controls have been signed off against hardware.**
-`docs/smoke-test.md` §4b and §4c are the gate before trusting them, and that file
-is the live tracker for every open hardware question.
+✅ **The two-part start (§4b) and the live goal (§4d) were signed off against
+hardware on 2026-08-27**, with the measurements in `docs/smoke-test.md`. §4c, the
+panel on hardware, is still unsigned — it is a UI procedure and needs an operator
+at the popup. That file is the live tracker for every open hardware question.
 
 ## Non-obvious facts. Do not re-derive these, and do not "fix" them.
 
@@ -76,6 +77,10 @@ already caused, or nearly caused, a wrong design decision.
     byte [14] when starting. The 0.5 km/h per-command clamp does NOT cover this —
     it governs changes, not the pad's own start. Starting is two steps: `start`,
     then the speed, inside the ~2 s window at `belt=running, speed=0.0`.
+    ✅ Confirmed end to end on 2026-08-27, three runs (smoke-test §4b): 4.00 s of
+    3-2-1 countdown, the follow-up speed landing 70 ms after the first `running`
+    frame with the pad already at 2.5 km/h and climbing, and the belt settling at
+    the commanded 2.0. `START_SPEED_WINDOW_S = 8.0` is measured adequate.
 
 13. **In `mode == standby` the pad ignores every motion command**, and the BLE
     mode-switch opcode too. Only the panel's **M** button leaves standby. Tell the

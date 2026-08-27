@@ -261,67 +261,110 @@ a pad or protocol behaviour and not a new hardware fact.
   stops advertising entirely. A connected, healthy-looking link can therefore be
   uncontrollable, and only the panel's M button restores manual mode.
 
-## ⚠ Link cut off every ~29 s (2026-08-27) — A CONDITION OF THE DAY, NOT A PAD PROPERTY
+## ⚠ The pad stops ANSWERING at 29.2 s. The link is healthy. (2026-08-27)
 
-Nine connection cycles across two bridge runs, every one cut off after 28–30 s of
-frames. The reconnect cadence was a metronomic 49–50 s: ~29 s of frames, the 15 s
-watchdog, ~5 s to rescan and reconnect.
+**This section replaces "Link cut off every ~29 s", written earlier the same day.
+That heading was wrong and is retracted.** Nothing cuts the link. The radio stays
+up, the pad keeps acknowledging every packet, and its application layer simply
+stops replying. The morning entry reasoned from the bridge's own stdout, which
+cannot tell those apart; the afternoon measured the radio with `btmon` and they
+are not the same fault at all.
 
-| connected | last frame | frames held |
+### What the HCI trace shows
+
+A 180 s `btmon` capture over three connection cycles, 16:13–16:16, decoded with
+`btmon -r`:
+
+- **Our poll frame keeps going out during the silence.** `f7 a2 00 00 a2 fd` to
+  FE02 (handle `0x000c`) every 2 s, exactly as the poll loop intends.
+- **The pad accepts every one of them.** The controller raises `Number of
+  Completed Packets` for each write, at 3–13 ms latency, with no retransmits and
+  no errors. The peer is taking our packets off the air and acknowledging them.
+- **The pad sends nothing back.** Not one peer-originated packet in an 18 s
+  window — no notification, no ATT error, no L2CAP request.
+- **`Disconnect Complete` reason is `0x16`, Connection Terminated By Local Host**,
+  on all three cycles. That is our own D-4 watchdog at 15 s. It is the effect, not
+  the cause, and reading it as "something disconnected us" inverts the causality.
+- **Connection parameters are healthy:** interval 11.25 ms, latency 0, supervision
+  timeout 6000 ms.
+
+At 1 m distance with every packet acknowledged, **range and 2.4 GHz interference
+are ruled out by measurement, not by argument.**
+
+### The window is a timer, to a tenth of a second
+
+Twelve consecutive connections, 16:25–16:34, measured from the first status reply
+to the last:
+
+| cycles | answered | belt |
 |---|---|---|
-| 14:44:59 | 14:45:28 | 29 s |
-| 14:45:48 | 14:46:16 | 28 s |
-| 14:46:37 | 14:47:05 | 28 s |
+| 12 of 12 | **29.1 – 29.2 s** | running in 10, stopped in 2 |
 
-What it is **not**, each checked rather than assumed:
+Twelve identical windows spanning a tenth of a second is a firmware timer. **Belt
+state does not affect it**: the pad mutes while running exactly as it mutes while
+idle. An earlier reading of this session claimed ~78 s while running; that came
+from eyeballing filtered output and is superseded by the table above.
 
-- **Not belt state.** Cycles were cut off identically with the belt stopped,
-  starting and running.
-- **Not our commands.** The last two cycles sent none at all.
+### It is still a condition, not a pad property
+
+`bouts.jsonl` holds a bout from 2026-08-26 of `dur_s` 1988 with `n` 2000: one
+unbroken link carrying ~1 Hz frames for 33 minutes, same pad, same firmware, same
+code, and a bout closes on link loss so it cannot span one. Today every bout is
+26–30 s, chopped by the mute.
+
+So the pad answered indefinitely one day and mutes at 29.2 s the next, and
+**nothing here explains why**. Design spec §11 open question 9 records it.
+**No fact in `AGENTS.md` follows from this**, and it must not be treated as an
+invariant — see the retraction at the top of this section for what happens when a
+symptom is promoted to a cause too early.
+
+### What it is not, each checked rather than assumed
+
+- **Not belt state.** Measured on both sides, 12 cycles.
+- **Not our commands.** Cycles that sent none behave identically.
 - **Not the poll cadence.** ~29 s at both the 1.0 s and the 2.0 s poll interval.
 - **Not adapter state.** A full `bluetoothctl power off` / `power on` changed
-  nothing; the very next cycle was cut off at 29 s again.
-- **Not contention.** The plugin was disabled for the whole run, so the bridge was
-  the only client, and the pad was the only connected BLE device.
+  nothing.
+- **Not contention.** The plugin was disabled throughout; the bridge was the only
+  client and the pad the only connected BLE device.
 - **Not a host software change.** No kernel, `bluez` or `linux-firmware` upgrade
-  since 2026-08-17, well before the stable session below.
+  since 2026-08-17, well before the 33-minute session above.
+- **Not the radio.** The `btmon` evidence above.
 
 `journalctl -k` logged `Bluetooth: hci0: ACL packet for unknown connection handle
-16` at every single reconnect — the controller delivering on a handle the host had
-already torn down.
+16` at every reconnect — the controller delivering on a handle the host had
+already torn down, which is a consequence of our teardown, not a cause.
 
-**The pad is not like this in general.** `bouts.jsonl` holds a bout from
-2026-08-26 of `dur_s` 1988 with `n` 2000: one unbroken link carrying ~1 Hz frames
-for 33 minutes, same pad, same firmware, same code. So this is a condition of the
-day — physical placement, interference or pad power state — and **no fact in
-AGENTS.md follows from it.** Do not design around it.
-
-### It made the §4b run inconclusive, and that is the lesson
+### How it made the morning's §4b run inconclusive
 
 One `{"cmd":"start","kmh":2.0}` at 14:40:00 produced two `belt: "starting"` frames
-and then silence. The watchdog tore the link down, the rescan reconnected at
-14:40:21, and the belt was already `running` at 3.5 km/h. `start_unconfirmed`
-fired correctly: `START_SPEED_WINDOW_S` (8 s) had expired with no `running` frame,
-so **no speed was ever sent**.
+and then silence, because the start landed near the end of an answered window. The
+watchdog tore down, the rescan reconnected, and the belt was already `running` at
+3.5 km/h. `start_unconfirmed` fired correctly: `START_SPEED_WINDOW_S` (8 s) expired
+with no `running` frame, so **no speed was ever sent**.
 
 The belt therefore sat at the pad's own ~3.5 km/h — the outcome §4b names as the
-hazard — **without the two-part start ever being exercised.** Reading that run as
-"the sequencing does not work on this firmware" would have been wrong, and it is
-the reading the raw symptom invites. A start into an unstable link is
-indistinguishable, at the belt, from a start whose follow-up speed the pad
-ignored. Hence the link-stability precondition now in smoke-test §4b.
+hazard — **without the two-part start ever being exercised.** Reading that as "the
+sequencing does not work on this firmware" would have been wrong, and it is the
+reading the raw symptom invites.
+
+The precondition this produced in smoke-test §4b was itself wrong on the first
+attempt: "the link must hold for 60 unbroken seconds" can never pass against a
+29.2 s window, so it would have blocked §4b permanently. The correct rule, and the
+one now in the procedure, is **send the start inside the answered window** — in
+practice within the first few seconds of a fresh connection.
 
 ### What behaved correctly under it, and is worth keeping
 
-- **The D-4 watchdog recovered 9 times out of 9**, unaided, with no retry storm and
-  no operator action.
+- **The D-4 watchdog recovered every time**, unaided, with no retry storm and no
+  operator action, across more than twenty cycles.
 - **`Safety.may_stop()` refused a stop on a stopped belt**, on hardware, with the
   `stop_unsafe` code. Fact 16's gate, live.
 - **The residual model did exactly what it claims.** `last_pad` 65 s / 0.05 km /
   90 steps against `attributed` 29 s / 0.03 km / 43 steps — a residual of 36 s /
-  0.02 km / 47 steps, which is precisely the walking lost to the link-down
-  windows. It detected and quantified lost frames, which accumulating our own
-  totals from observed deltas could never have done.
+  0.02 km / 47 steps, precisely the walking lost to the mute windows. It detected
+  and quantified lost frames, which accumulating our own totals from observed
+  deltas could never have done.
 
 ### External corroboration — a different protocol, and NOT verified here
 
@@ -334,17 +377,17 @@ on the start sequencing, not because it settles anything.
   for the first non-zero speed in the notification stream before sending any
   target. That is the same shape as our two-part start, arrived at independently.
 - **§2.7:** no keepalive or heartbeat frame appears in any of their four captures.
-  The link stays up on link-layer keepalives and the notification stream alone.
   **Nobody in the ecosystem has a keepalive**; detect-and-reconnect is the
-  universal answer, which is what D-4 already does.
-- Their equivalent of `START_SPEED_WINDOW_S` allows **15 s** for the belt to start;
-  ours allows 8 s. A candidate to revisit — **on evidence, never by widening it to
-  make a failing run pass.**
+  universal answer, which is what D-4 already does. Note this pad's mute is not
+  something a keepalive would have prevented: it acknowledges our packets
+  throughout, so the link never needed keeping alive.
+- Their equivalent of `START_SPEED_WINDOW_S` allows **15 s**; ours allows 8 s.
+  **Settled on hardware 2026-08-27: 8 s is enough.** Three §4b runs reached
+  `belt: "running"` in 4.00, 4.03 and 4.00 s. Do not widen it.
 - Their connect path retries 5 times at 3 s intervals, because the firmware "can be
   left in a bad state for several seconds after a previous abrupt disconnect".
 - `ph4-walkingpad` enforces a `minimal_cmd_space` of 0.69 s between writes. Our
   1.0 s poll is already above that floor.
 
 ⚠ All of the above is **FTMS / 0x1826**. This C2 speaks WiLink FE00 and has no
-FTMS service at all, and none of it explains a cut-off with the belt stopped and
-no commands sent. Suggestive, not transferable, and not evidence about this pad.
+FTMS service at all. Suggestive, not transferable, and not evidence about this pad.

@@ -33,9 +33,10 @@ not per-session values. Measured properties:
   reports 0.69 km, so the counter advances only while the belt moves.
 - The counters **survive a stop**. Operator observation, 2026-08-25: walk, stop for
   twenty seconds, start again, and the counters continue rather than restarting.
-  ⚠ **Reported, not yet captured.** `docs/smoke-test.md` gains a step to record it
-  (§8.3 below). Until then it is an operator report, which is weaker evidence than
-  everything else in `AGENTS.md`.
+  ✅ **CAPTURED 2026-08-27** (`docs/smoke-test.md` §4e). Counters read 169/0.09/188
+  before a stop and 171/0.09/188 on the first `running` frame after the restart,
+  then climbed to 290/0.15/321. They continue rather than reset, so the model
+  below holds and `residual` stays meaningful across a stop.
 - The counters **do reset**. Measured 2026-08-24: an awake, idle pad
   (`belt == 4`, `mode == standby`) reported every counter at zero
   (`docs/protocol-evidence.md`, "NEW PROTOCOL FACT — belt == 4"). The trigger is
