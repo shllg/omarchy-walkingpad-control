@@ -178,9 +178,16 @@ stdout → one JSON object per line:
 {"t":"status","belt":"running","speed":2.5,"target":2.5,"pad_set_speed":0.0,
  "mode":"manual","time":1014,"dist_km":0.70,"steps":1321}
 {"t":"link","state":"connected","addr":"<pad-addr>","name":"KS-BLC2"}
+{"t":"link","state":"lost","msg":"no status frame for 15s","answered_s":29.04}
 {"t":"error","code":"no_link","msg":"not connected to the pad"}
 {"t":"error","code":"start_unconfirmed","msg":"the belt did not start within 8s; no speed was sent"}
 ```
+
+`answered_s` on a lost link is how long the pad replied on that connection
+before going quiet, and `0.0` means it never replied at all. It exists for open
+question 9: this pad has been measured answering for ~29 s and then falling
+silent with its radio still acknowledging every packet, and without this number
+that condition is indistinguishable from an ordinary reconnect in any log.
 
 `pad_set_speed` is what the pad has stored from the last BLE speed command; it
 reads 0.0 when the speed was most recently set at the panel (AGENTS.md fact 15).
@@ -801,6 +808,15 @@ submission (`docs/plugin-evidence.md`).
    Until this is understood, **the D-4 watchdog and reconnect are what make the
    plugin usable at all**, and any procedure that sends a command must send it
    early in a fresh connection.
+
+   **Narrowed 2026-08-27, still open.** A power cycle at the pad's own switch
+   does not clear it: 29.04 s, 28.25 s and 28.32 s on the three connections that
+   answered afterwards. Four candidate causes are eliminated by measurement --
+   our BLE code (byte-identical to the session that never muted), the host (no
+   reboot since before that session), BlueZ (one continuous `bluetoothd` across
+   both), and contention from a second BLE client (the mute predates the second
+   process by nearly two hours). What remains is the pad's own firmware, re-arming
+   per connection. Nothing we can vary on this machine has moved it.
 
 7. How long until the pad sleeps, and whether anything short of physical
    interaction wakes it. Measured: once asleep it stops advertising entirely,

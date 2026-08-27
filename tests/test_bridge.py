@@ -125,6 +125,43 @@ def test_a_silent_link_is_torn_down_not_shown_as_live():
     assert t.writes == []
 
 
+def test_a_lost_link_reports_how_long_the_pad_answered():
+    # Open question 9: measured 2026-08-27, this pad replies for ~29 s after a
+    # connection and then goes silent while its radio still acknowledges every
+    # packet. Without this number every reconnect looks identical in a log and
+    # the condition needs root and a btmon capture to see at all.
+    import time as _time
+    t = FakeTransport()
+    b = Bridge(transport=t)
+    emitted = []
+    b.emit = emitted.append
+    now = _time.monotonic()
+    b._connected_at = now - 60.0
+    b._last_status_at = now - 30.9
+    b._service_link()
+    lost = [o for o in emitted if o.get("state") == "lost"]
+    assert len(lost) == 1
+    assert lost[0]["answered_s"] == 29.1
+
+
+def test_a_connection_that_never_answered_reports_no_window():
+    # _last_status_at survives the previous connection, so a naive subtraction
+    # would credit this one with a window it never had. 0.0 is the honest answer
+    # and keeps "never spoke" distinguishable from "spoke, then muted".
+    import time as _time
+    t = FakeTransport()
+    b = Bridge(transport=t)
+    emitted = []
+    b.emit = emitted.append
+    now = _time.monotonic()
+    b._last_status_at = now - 90.0
+    b._connected_at = now - 60.0
+    b._service_link()
+    lost = [o for o in emitted if o.get("state") == "lost"]
+    assert len(lost) == 1
+    assert lost[0]["answered_s"] == 0.0
+
+
 def test_a_speaking_link_is_kept_and_polled():
     import time as _time
     t = FakeTransport()

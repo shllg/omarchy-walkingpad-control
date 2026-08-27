@@ -435,6 +435,23 @@ class Bridge:
             self.store.close_open_bout()
 
     # -- link --------------------------------------------------------------
+    def _answered_s(self) -> float:
+        """How long the pad answered on THIS connection before going quiet.
+
+        Design spec open question 9: this pad has been measured replying for
+        ~29 s after a connection and then falling silent while its radio still
+        acknowledges every packet we send. Nothing else in the output separates
+        that from an ordinary link loss, so every reconnect looks the same in a
+        log and the condition can only be caught with a `btmon` capture and root.
+        Reporting the window on the loss itself makes it visible in any bridge
+        log, with no capture and no hardware.
+
+        0.0 means the pad never answered at all on this connection --
+        `_last_status_at` then still belongs to an earlier one, or to no frame
+        at all, and either way this connection has no window to report.
+        """
+        return round(max(0.0, self._last_status_at - self._connected_at), 2)
+
     def _service_link(self) -> float:
         """Do one unit of link work. Returns seconds until the next tick."""
         if not self.transport.connected:
@@ -481,7 +498,8 @@ class Bridge:
         silent_for = time.monotonic() - max(self._connected_at, self._last_status_at)
         if silent_for > LINK_DEAD_AFTER_S:
             self.emit({"t": "link", "state": "lost",
-                       "msg": "no status frame for %.0fs" % silent_for})
+                       "msg": "no status frame for %.0fs" % silent_for,
+                       "answered_s": self._answered_s()})
             self.transport.disconnect()
             self._close_store_bout_after_link_loss()
             return POLL_INTERVAL_S
@@ -489,7 +507,8 @@ class Bridge:
         try:
             self.transport.write(frames.query())
         except Exception as exc:
-            self.emit({"t": "link", "state": "lost", "msg": str(exc)})
+            self.emit({"t": "link", "state": "lost", "msg": str(exc),
+                       "answered_s": self._answered_s()})
             self.transport.disconnect()
             self._close_store_bout_after_link_loss()
             # One prompt reconnect attempt. If the pad has actually gone, find()
