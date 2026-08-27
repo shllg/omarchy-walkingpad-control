@@ -391,3 +391,78 @@ on the start sequencing, not because it settles anything.
 
 ⚠ All of the above is **FTMS / 0x1826**. This C2 speaks WiLink FE00 and has no
 FTMS service at all. Suggestive, not transferable, and not evidence about this pad.
+
+### A power cycle does not clear it, and four more causes are eliminated (2026-08-27)
+
+The pad was switched off at its own power switch and back on. The mute survived
+it. Measured immediately afterwards, over 200 s and four connections:
+
+| connection | answered for | then |
+|---|---|---|
+| 1 | never answered | rescan after 14.0 s |
+| 2 | **29.04 s** | link lost at +46.1 s |
+| 3 | **28.25 s** | link lost at +44.1 s |
+| 4 | **28.32 s** | link lost at +44.1 s |
+
+Same window as before the power cycle, so nothing the pad holds across a reboot
+of its own control board is responsible. Whatever arms the timer is re-armed on
+every fresh connection.
+
+**Four causes eliminated, each by measurement rather than argument.**
+
+1. **Our BLE code.** `git diff 8e08ce0..HEAD -- walkingpad/transport.py
+   walkingpad/bridge.py` is a comment-only edit to one docstring. The session
+   that answered indefinitely ran the same bytes as the sessions that mute.
+2. **The host.** No reboot since 2026-08-26 01:58, which is before the good
+   session. Same kernel throughout.
+3. **BlueZ.** `bluetoothd` has been one continuous process for 39 h, spanning
+   both the good session and every muting one.
+4. **A second BLE client.** Two bridge processes were found running at once —
+   the plugin's, spawned by quickshell, and a manual one. Contention is real and
+   has its own consequences (below), but it is **not** the trigger: the store's
+   19–20 s sample gaps begin at 14:40:02, and the plugin's bridge did not start
+   until 16:36:53. A single-writer window shows the mute with no second client
+   present at all.
+
+That leaves the pad's own firmware, re-arming per connection, with no input from
+anything on this machine that we have been able to vary.
+
+**The gap fingerprint, and its one limit.** A mute leaves a hole of roughly
+19–20 s between consecutive stored samples: the 15 s watchdog plus rescan and
+reconnect. That makes past sessions classifiable from the store alone, with no
+capture and no hardware.
+
+⚠ It only sees mutes **during a walk**. Design §2.2 records samples only for
+`starting`/`running` frames plus a short tail, so an idle pad writes nothing and
+a long sample gap across a stop is ordinary. A gap is evidence of a mute only
+when the belt was running on both sides of it. The bridge's own
+`{"t":"link","state":"lost"}` carries `answered_s` for exactly this reason and is
+the unambiguous record.
+
+### Two bridges do not fail. They silently share the link. (2026-08-27)
+
+Found while measuring the above: `omarchy plugin`'s installed copy is spawned by
+quickshell and runs permanently, so any manually started bridge is a **second**
+BLE client. AGENTS.md fact 5 says only one connection to the pad exists at a
+time, and that remains true — but it is BlueZ that owns it, and two D-Bus clients
+share that one link instead of the second being refused. Both poll it, and BlueZ
+broadcasts every notification to both.
+
+Consequences worth knowing before trusting any capture:
+
+- Killing the plugin's bridge does not give exclusivity. quickshell respawned it
+  in **3 s**, measured.
+- A manual bridge run alongside the plugin's doubles the poll rate the pad sees.
+- Frames arrive on two interleaved cadences, which reads as duplication.
+
+### ⚠ The window is not always 29 s (2026-08-27, later the same evening)
+
+"To a tenth of a second" above described twelve cycles that agreed. It does not
+generalise. With `answered_s` now reported on every link loss, a run measured
+**23.08 s** while a second bridge was also polling. The four post-power-cycle
+connections gave 29.04, 28.25 and 28.32 s under the same contention, so the
+second client is not a clean explanation either.
+
+What survives: the pad answers for roughly half a minute and then goes quiet.
+What does not: any claim that the number is fixed. Do not treat 29.2 s as a
+constant to design against; read `answered_s` from the log instead.

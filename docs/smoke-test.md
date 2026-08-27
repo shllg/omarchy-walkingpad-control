@@ -271,6 +271,24 @@ of these against the bar icon and popup:
    seconds, and after four kills in a minute to show a hard error rather than
    respawning forever.
 
+**Runs so far.**
+
+- **2026-08-27 — one observation, §4c otherwise still unsigned.** Pressing Start
+  on a stopped belt was refused with `stale_link` — "no recent status; refusing to
+  move the belt" — and a later press succeeded. Confirmed by the operator.
+
+  **This is the 29.2 s mute reaching the user**, not a widget defect. Neither the
+  button (`WalkingpadPanel.qml:121`, no `enabled` condition) nor the service
+  (`WalkingpadService.qml:128`, always sends) gates a start, and `Safety.may_move`
+  is nothing but `last_status_age_s <= 3.0`. With the pad answering 29.2 s of each
+  ~48 s cycle, roughly **one press in three lands in a dead window.**
+
+  ⚠ The operator's impression was that pressing Stop first is what enabled the
+  Start. It is not: a stop on a stopped belt is refused by `may_stop` and clears
+  nothing that gates a start. The few seconds it took were what mattered, because
+  a fresh connection landed. Do not build a "press stop first" workaround on this;
+  the cause is open question 9.
+
 ## 4d. The live goal — stand clear of the belt
 
 ⚠ The goal is the first thing in this bridge that writes a motion command with
