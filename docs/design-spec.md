@@ -202,7 +202,7 @@ WalkingPad semantics. `safety.py` gates motion commands. `bridge.py` orchestrate
 the poll loop and command dispatch.
 
 FTMS, the standard `0x1826` service, is **deferred**. As recorded in
-`docs/plans/2026-08-24-bridge-stage1.md` under "Deferred to later stages", the
+`docs/plans/2026-08-24-bridge-stage1.md` under "Still open", the
 author's C2 has no `0x1826`, so nobody involved can test an FTMS path. Building
 one now would ship untested code claiming support. Per D-1's existing principle,
 untestable code must be clearly marked as such rather than shipped silently.

@@ -260,3 +260,91 @@ a pad or protocol behaviour and not a new hardware fact.
   while still advertising and answering polls. Distinct from sleeping, where it
   stops advertising entirely. A connected, healthy-looking link can therefore be
   uncontrollable, and only the panel's M button restores manual mode.
+
+## ⚠ Link cut off every ~29 s (2026-08-27) — A CONDITION OF THE DAY, NOT A PAD PROPERTY
+
+Nine connection cycles across two bridge runs, every one cut off after 28–30 s of
+frames. The reconnect cadence was a metronomic 49–50 s: ~29 s of frames, the 15 s
+watchdog, ~5 s to rescan and reconnect.
+
+| connected | last frame | frames held |
+|---|---|---|
+| 14:44:59 | 14:45:28 | 29 s |
+| 14:45:48 | 14:46:16 | 28 s |
+| 14:46:37 | 14:47:05 | 28 s |
+
+What it is **not**, each checked rather than assumed:
+
+- **Not belt state.** Cycles were cut off identically with the belt stopped,
+  starting and running.
+- **Not our commands.** The last two cycles sent none at all.
+- **Not the poll cadence.** ~29 s at both the 1.0 s and the 2.0 s poll interval.
+- **Not adapter state.** A full `bluetoothctl power off` / `power on` changed
+  nothing; the very next cycle was cut off at 29 s again.
+- **Not contention.** The plugin was disabled for the whole run, so the bridge was
+  the only client, and the pad was the only connected BLE device.
+- **Not a host software change.** No kernel, `bluez` or `linux-firmware` upgrade
+  since 2026-08-17, well before the stable session below.
+
+`journalctl -k` logged `Bluetooth: hci0: ACL packet for unknown connection handle
+16` at every single reconnect — the controller delivering on a handle the host had
+already torn down.
+
+**The pad is not like this in general.** `bouts.jsonl` holds a bout from
+2026-08-26 of `dur_s` 1988 with `n` 2000: one unbroken link carrying ~1 Hz frames
+for 33 minutes, same pad, same firmware, same code. So this is a condition of the
+day — physical placement, interference or pad power state — and **no fact in
+AGENTS.md follows from it.** Do not design around it.
+
+### It made the §4b run inconclusive, and that is the lesson
+
+One `{"cmd":"start","kmh":2.0}` at 14:40:00 produced two `belt: "starting"` frames
+and then silence. The watchdog tore the link down, the rescan reconnected at
+14:40:21, and the belt was already `running` at 3.5 km/h. `start_unconfirmed`
+fired correctly: `START_SPEED_WINDOW_S` (8 s) had expired with no `running` frame,
+so **no speed was ever sent**.
+
+The belt therefore sat at the pad's own ~3.5 km/h — the outcome §4b names as the
+hazard — **without the two-part start ever being exercised.** Reading that run as
+"the sequencing does not work on this firmware" would have been wrong, and it is
+the reading the raw symptom invites. A start into an unstable link is
+indistinguishable, at the belt, from a start whose follow-up speed the pad
+ignored. Hence the link-stability precondition now in smoke-test §4b.
+
+### What behaved correctly under it, and is worth keeping
+
+- **The D-4 watchdog recovered 9 times out of 9**, unaided, with no retry storm and
+  no operator action.
+- **`Safety.may_stop()` refused a stop on a stopped belt**, on hardware, with the
+  `stop_unsafe` code. Fact 16's gate, live.
+- **The residual model did exactly what it claims.** `last_pad` 65 s / 0.05 km /
+  90 steps against `attributed` 29 s / 0.03 km / 43 steps — a residual of 36 s /
+  0.02 km / 47 steps, which is precisely the walking lost to the link-down
+  windows. It detected and quantified lost frames, which accumulating our own
+  totals from observed deltas could never have done.
+
+### External corroboration — a different protocol, and NOT verified here
+
+Read from the `walkingpad-controller` source (`mcdax/walkingpad-controller`),
+`docs/ftms-protocol-reference.md`, and `ph4-walkingpad`. Recorded because it bears
+on the start sequencing, not because it settles anything.
+
+- **§2.6, from btsnoop captures of the vendor app:** `START_OR_RESUME` followed too
+  quickly by `SET_TARGET_SPEED` *crashes the BLE link*, and the vendor app waits
+  for the first non-zero speed in the notification stream before sending any
+  target. That is the same shape as our two-part start, arrived at independently.
+- **§2.7:** no keepalive or heartbeat frame appears in any of their four captures.
+  The link stays up on link-layer keepalives and the notification stream alone.
+  **Nobody in the ecosystem has a keepalive**; detect-and-reconnect is the
+  universal answer, which is what D-4 already does.
+- Their equivalent of `START_SPEED_WINDOW_S` allows **15 s** for the belt to start;
+  ours allows 8 s. A candidate to revisit — **on evidence, never by widening it to
+  make a failing run pass.**
+- Their connect path retries 5 times at 3 s intervals, because the firmware "can be
+  left in a bad state for several seconds after a previous abrupt disconnect".
+- `ph4-walkingpad` enforces a `minimal_cmd_space` of 0.69 s between writes. Our
+  1.0 s poll is already above that floor.
+
+⚠ All of the above is **FTMS / 0x1826**. This C2 speaks WiLink FE00 and has no
+FTMS service at all, and none of it explains a cut-off with the belt stopped and
+no commands sent. Suggestive, not transferable, and not evidence about this pad.

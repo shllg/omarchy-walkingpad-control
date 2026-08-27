@@ -166,6 +166,28 @@ shell, so stdout is visible:
 ./bin/walkingpad-bridge
 ```
 
+⚠ **Disable the plugin first** (`omarchy plugin disable io.github.shllg.walkingpad`)
+so the shell's own bridge releases the link — only one BLE connection to the pad
+exists at a time (fact 5). Re-enable it afterwards; `disable` removes the bar
+placement, so back up `~/.config/omarchy/shell.json` before and restore it after.
+
+⚠⚠ **Gate: the link must hold for 60 unbroken seconds before you send anything.**
+Watch stdout with no commands at all and confirm no `{"t":"link","state":"lost"}`
+appears for a full minute. **Do not start the belt until it does.**
+
+This is not ceremony. On 2026-08-27 the link was being cut off every ~29 s, the
+start command landed one second before a cut-off, and the belt ended up at the
+pad's own ~3.5 km/h with the follow-up speed never sent — which is exactly what
+this procedure's failure branch describes, produced by something that has nothing
+to do with the start sequencing. **A start into an unstable link is
+indistinguishable, at the belt, from a start whose speed the pad ignored**, so
+without this gate a failing run cannot be told from a broken feature. The full
+observation is in `docs/protocol-evidence.md`, "Link cut off every ~29 s".
+
+If the gate fails, this run is **inconclusive — not a failure**. Record it as
+inconclusive, stop, and fix the link first. Do not widen
+`START_SPEED_WINDOW_S` to make it pass.
+
 **Procedure.**
 
 1. Confirm status frames are arriving and `belt` reads `stopped` or `idle`.
@@ -185,6 +207,15 @@ shell, so stdout is visible:
   (8 s) for the belt to start at all, which is a different number.
 - Did `{"t":"error","code":"start_unconfirmed",...}` appear? If so the belt never
   reported `running` within the window and no speed was sent.
+
+**Runs so far.**
+
+- **2026-08-27 — INCONCLUSIVE. §4b is still unsigned.** The link was being cut
+  off every ~29 s that day. The start landed one second before a cut-off, the
+  belt never reported `running` inside the 8 s window, `start_unconfirmed` fired,
+  no speed was sent, and the belt settled at the pad's own ~3.5 km/h. The
+  sequencing was never exercised, so this says nothing about it either way. The
+  link gate above was added because of this run.
 
 **Then stop the belt from the panel, not over BLE**, and record whether the
 status stream follows the transition. Use the BLE stop only in §3, where its
@@ -296,6 +327,15 @@ store without any additional flag:
   reset in that model. The `residual` concept becomes meaningless as designed,
   and the attribution model needs rework before it can be trusted. This is a real
   possible outcome: record it honestly rather than explaining it away.
+
+**Runs so far.**
+
+- **2026-08-27 — HALF ANSWERED. Still unsigned.** `time` 65, `dist_km` 0.05 and
+  `steps` 90 held identical across a panel stop and three reconnects, so the
+  counters survive a stop *in place*. The decisive half is untouched: the belt was
+  never restarted, so whether they **continue climbing from 65** or drop toward
+  zero is still unknown, and that is the half the attribution model rests on. The
+  §4b link gate applies here too — this procedure starts the belt.
 
 ## 4f. The sleep boundary's counter half
 
