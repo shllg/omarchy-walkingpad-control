@@ -63,6 +63,29 @@ def test_speed_is_refused_on_a_stale_link():
     assert b.handle_command({"cmd": "speed", "kmh": 3.0}) is None
 
 
+def test_a_stale_link_refusal_tells_the_user_what_to_do():
+    # §5.3 keeps the buttons pressable and leaves the refusing to the bridge, so
+    # this string IS the user interface -- the panel renders it verbatim. Open
+    # question 9 measured the pad answering ~29 s of each ~48 s cycle, which puts
+    # roughly one press in three here on a pad that is awake and a metre away.
+    # A refusal that only says what it refused reads as a broken plugin.
+    b = make_bridge()
+    emitted = []
+    b.emit = emitted.append
+    b._last_status_age = lambda: 42.5
+
+    assert b.handle_command({"cmd": "start", "kmh": 2.0}) is None
+
+    refusals = [o for o in emitted if o.get("code") == "stale_link"]
+    assert len(refusals) == 1
+    message = refusals[0]["msg"]
+    # It has to say that nothing was sent, and what to do next. Asserting on the
+    # whole string would pin the wording; these are the two things it must carry.
+    assert "nothing was sent" in message
+    assert "try again" in message
+    assert refusals[0]["status_age_s"] == 42.5
+
+
 def test_unknown_command_is_ignored():
     assert make_bridge().handle_command({"cmd": "explode"}) is None
 

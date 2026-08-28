@@ -274,8 +274,10 @@ of these against the bar icon and popup:
 **Runs so far.**
 
 - **2026-08-27 — one observation, §4c otherwise still unsigned.** Pressing Start
-  on a stopped belt was refused with `stale_link` — "no recent status; refusing to
-  move the belt" — and a later press succeeded. Confirmed by the operator.
+  on a stopped belt was refused with `stale_link` — then worded "no recent status;
+  refusing to move the belt" — and a later press succeeded. Confirmed by the
+  operator. ⚠ That wording was replaced on 2026-08-28: the refusal now says what
+  was seen and what to do, because this is the refusal a user meets most often.
 
   **This is the 29.2 s mute reaching the user**, not a widget defect. Neither the
   button (`WalkingpadPanel.qml:121`, no `enabled` condition) nor the service

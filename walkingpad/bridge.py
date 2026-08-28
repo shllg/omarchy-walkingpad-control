@@ -172,8 +172,24 @@ class Bridge:
             return frames.stop()
 
         if not self.safety.may_move(self._last_status_age()):
+            # Design §5.6's rule, applied to the refusal a user actually meets
+            # most often: say what was seen and what to do about it, rather than
+            # only what was refused. Open question 9 measured this pad answering
+            # for ~29 s of each ~48 s cycle, so roughly one press in three lands
+            # while it is quiet -- on a pad that is awake, healthy and a metre
+            # away. "No recent status" is true and tells the user nothing.
+            #
+            # ⚠ This is a MESSAGE change, not a gate change. §5.3 keeps the
+            # buttons pressable and leaves refusing to the bridge; making the
+            # panel disable them would be a second copy of Safety.may_move in
+            # QML, which is the one thing that section forbids.
             self.emit({"t": "error", "code": "stale_link",
-                       "msg": "no recent status; refusing to move the belt"})
+                       "msg": "the pad has gone quiet, so nothing was sent. If it "
+                              "is awake the link re-establishes itself within "
+                              "about 20 s -- try again then.",
+                       # The age is what the gate actually refused on. It costs
+                       # one key and makes question 9 legible in a plain log.
+                       "status_age_s": round(self._last_status_age(), 2)})
             return None
 
         # Measured 2026-08-24: in standby the pad answers status queries but

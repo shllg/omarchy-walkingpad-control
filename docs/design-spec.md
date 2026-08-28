@@ -181,7 +181,14 @@ stdout → one JSON object per line:
 {"t":"link","state":"lost","msg":"no status frame for 15s","answered_s":29.04}
 {"t":"error","code":"no_link","msg":"not connected to the pad"}
 {"t":"error","code":"start_unconfirmed","msg":"the belt did not start within 8s; no speed was sent"}
+{"t":"error","code":"stale_link","msg":"the pad has gone quiet, ...","status_age_s":42.5}
 ```
+
+`stale_link` carries `status_age_s`, the age the gate actually refused on. Its
+`msg` is the user interface: §5.3 keeps the buttons pressable and leaves refusing
+to the bridge, so the panel renders this string verbatim. It follows §5.6's rule
+-- say what was seen and what to do -- because open question 9 puts roughly one
+press in three here, on a pad that is awake and a metre away.
 
 `answered_s` on a lost link is how long the pad replied on that connection
 before going quiet, and `0.0` means it never replied at all. It exists for open
