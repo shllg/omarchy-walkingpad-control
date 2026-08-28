@@ -29,9 +29,8 @@ is a different Omarchy plugin for KingSmith pads, and it is good work. It was
 listed shortly before this one, and this one was written without knowledge of it —
 parallel work on the same idea, not either derived from the other.
 
-The emphasis differs. That plugin is built around step tracking and daily targets;
-this one is built around controlling the belt, and treats the safety of doing so as
-the hard part. If belt control is not what you are after, look there instead.
+Go and try it as well. There are ideas in it worth learning from, and some may well
+find their way here.
 
 ## Requirements
 
