@@ -354,6 +354,21 @@ Item {
     // The bridge gave up on a start it had armed, so drop the optimistic
     // target with it rather than showing a speed nothing is heading for.
     if (state.lastErrorCode === "start_unconfirmed") state.pendingSpeed = null
+
+    // Same rule for the goal. `bridge.py:188` refuses on a stale link, and
+    // standby just below it, BEFORE the goal is adopted -- so on either code
+    // the bridge holds no goal and our optimistic copy is a number nobody is
+    // heading for. Dropping it resyncs the display to what the bridge actually
+    // has (line 58 falls back to state.goalSpeed).
+    //
+    // ⚠ Measured on hardware 2026-08-28. Without this, every press during a
+    // mute added another step to a value that was never sent: the popup read
+    // "Goal 5.0 km/h" and "nothing was sent" at the same time, and the whole
+    // accumulated intention then landed in one go when the link returned. The
+    // belt was safe throughout -- each write is still one clamp_speed() step --
+    // but a speed change nobody is expecting is exactly what §5.8 forbids.
+    if (state.lastErrorCode === "stale_link"
+        || state.lastErrorCode === "standby") state.pendingGoal = null
   }
 
   function handleLine(line) {
