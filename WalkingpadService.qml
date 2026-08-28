@@ -213,7 +213,34 @@ Item {
       : (root.goalSpeed !== null
           ? Number(root.goalSpeed)
           : (state.hasStatus ? state.currentSpeed : 0))
-    setGoal(base + delta)
+
+    // ⚠ Land on the step grid, do not just add to the base.
+    //
+    // The last fallback above is the belt's ACTUAL speed, and fact 2 is the
+    // trap: reported speed is actual rather than target, and the pad ramps
+    // ~0.25 km/h per second. So with no goal yet, the base is wherever the ramp
+    // happened to be at the instant of the press, at the pad's 0.1 resolution --
+    // and `base + delta` bakes that into the goal, which then carries the
+    // offset through every later press.
+    //
+    // Measured on hardware 2026-08-28: `+` pressed twice while the belt ramped
+    // out of a start produced a goal of 2.1, then 3.1 (samples at t=…853.14 and
+    // t=…855.14, `pe` 2 and 4). 2.1 is 1.6 + 0.5, and 1.6 km/h is where the
+    // ramp was. Every goal set on a settled belt that day was clean.
+    //
+    // The rule: move to the next grid multiple STRICTLY in the pressed
+    // direction. On the grid already -- which is every press after the first --
+    // that is exactly base + delta, so 8182722's "N presses mean N steps" is
+    // untouched. Off the grid, the first press moves LESS than one step rather
+    // than more, which is the safe direction with someone on the belt.
+    //
+    // The epsilon absorbs binary float error: 2.5 / 0.5 is 5.000000000000001,
+    // and without it a base already on the grid would jump two steps.
+    var step = root.speedStep
+    var next = delta > 0
+      ? Math.floor(base / step + 1e-9) * step + step
+      : Math.ceil(base / step - 1e-9) * step - step
+    setGoal(next)
   }
 
   function speedUp() { speedBy(root.speedStep) }
