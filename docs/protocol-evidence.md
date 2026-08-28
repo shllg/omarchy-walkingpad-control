@@ -408,16 +408,26 @@ Same window as before the power cycle, so nothing the pad holds across a reboot
 of its own control board is responsible. Whatever arms the timer is re-armed on
 every fresh connection.
 
-**Four causes eliminated, each by measurement rather than argument.**
+**Five causes eliminated. Every one now rests on a test that was actually run,
+not on an argument from what did not change.**
 
 1. **Our BLE code.** `git diff 8e08ce0..HEAD -- walkingpad/transport.py
    walkingpad/bridge.py` is a comment-only edit to one docstring. The session
    that answered indefinitely ran the same bytes as the sessions that mute.
 2. **The host.** No reboot since 2026-08-26 01:58, which is before the good
    session. Same kernel throughout.
-3. **BlueZ.** `bluetoothd` has been one continuous process for 39 h, spanning
-   both the good session and every muting one.
-4. **A second BLE client.** Two bridge processes were found running at once —
+3. **BlueZ.** ⚠ This was first argued from `bluetoothd` having been one
+   continuous process for 39 h, spanning both the good session and every muting
+   one. **That reasoning was backwards and is retracted** -- continuity is the
+   precondition for accumulated state, not evidence against it, and the good
+   session ran 7.5 h after boot against 36-40 h for the muting ones. Settled
+   properly on 2026-08-28 by `systemctl restart bluetooth`: the next connections
+   answered 29.10 s and 28.04 s. Restarting the daemon changes nothing.
+4. **The BLE controller.** A daemon restart does not reset the adapter, whose own
+   state also spans both sessions. `rfkill block bluetooth` then `unblock`, which
+   resets the controller without restarting `bluetoothd`, left the window at
+   28.09 s. Measured 2026-08-28.
+5. **A second BLE client.** Two bridge processes were found running at once —
    the plugin's, spawned by quickshell, and a manual one. Contention is real and
    has its own consequences (below), but it is **not** the trigger: the store's
    19–20 s sample gaps begin at 14:40:02, and the plugin's bridge did not start
@@ -425,7 +435,39 @@ every fresh connection.
    present at all.
 
 That leaves the pad's own firmware, re-arming per connection, with no input from
-anything on this machine that we have been able to vary.
+anything on this machine that we have been able to vary. Three separate resets --
+the pad at its own power switch, the Bluetooth daemon, and the BLE controller --
+each left the window within a second of 29 s.
+
+⚠ This remains an elimination argument, which is the weakest kind of claim in
+this file: everything else here was measured directly, and this is inferred from
+what is left. "Firmware" names the region of the search space that survives, not
+a defect anyone has observed inside the pad. It is why this is design spec open
+question 9 and not an AGENTS.md fact.
+
+### Independent corroboration: the same shape, a different pad, another codebase
+
+`ph4r05/ph4-walkingpad` issue #16, "Works for a few seconds only" (2024-07-27).
+The reporter, on an A1-family belt with a completely separate implementation:
+
+> "Using `--ignore-bad-packets` helps somewhat: I get data for longer (about one
+> minute), then no more. No exception is logged, but no more data is collected
+> either."
+
+Data for tens of seconds to about a minute, then silence, with no error and no
+disconnect. That is this mute's shape, which moves it from "this pad, this
+evening" to something the ecosystem has already met.
+
+Their recovery was to power-cycle the belt **and** run `systemctl restart
+bluetooth.service` together. Both halves have now been tried here separately and
+neither helps, so it does not reproduce -- though nobody has tried them combined
+in one window.
+
+⚠ Not everything transfers. Their belt also emitted malformed short frames and
+crashed the parser with `IndexError: bytearray index out of range`. We see
+nothing of the kind: `btmon` shows the pad sending **zero bytes**, not bad ones,
+while still acknowledging every packet. Theirs may be two faults where ours is
+one.
 
 **The gap fingerprint, and its one limit.** A mute leaves a hole of roughly
 19–20 s between consecutive stored samples: the 15 s watchdog plus rescan and

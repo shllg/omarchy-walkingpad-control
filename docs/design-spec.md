@@ -809,14 +809,24 @@ submission (`docs/plugin-evidence.md`).
    plugin usable at all**, and any procedure that sends a command must send it
    early in a fresh connection.
 
-   **Narrowed 2026-08-27, still open.** A power cycle at the pad's own switch
-   does not clear it: 29.04 s, 28.25 s and 28.32 s on the three connections that
-   answered afterwards. Four candidate causes are eliminated by measurement --
-   our BLE code (byte-identical to the session that never muted), the host (no
-   reboot since before that session), BlueZ (one continuous `bluetoothd` across
-   both), and contention from a second BLE client (the mute predates the second
-   process by nearly two hours). What remains is the pad's own firmware, re-arming
-   per connection. Nothing we can vary on this machine has moved it.
+   **Narrowed 2026-08-28, still open.** Three separate resets each left the
+   window within a second of 29 s: the pad at its own power switch (29.04, 28.25,
+   28.32 s), `systemctl restart bluetooth` (29.10, 28.04 s), and an `rfkill`
+   controller cycle that resets the adapter without restarting the daemon
+   (28.09 s). Five candidate causes are eliminated -- our BLE code
+   (byte-identical to the session that never muted), the host (no reboot since
+   before that session), the Bluetooth daemon, the BLE controller, and contention
+   from a second BLE client (the mute predates the second process by nearly two
+   hours).
+
+   ⚠ An earlier version of this paragraph eliminated BlueZ because `bluetoothd`
+   had been one continuous process across both sessions. That is backwards --
+   continuity is the precondition for accumulated state -- and it is retracted in
+   favour of the restart above. `ph4r05/ph4-walkingpad` issue #16 reports the
+   same shape on a different belt and codebase; its recovery does not reproduce
+   here. What remains is the pad's own firmware, re-arming per connection, and it
+   remains an inference from what is left rather than anything measured inside
+   the pad.
 
 7. How long until the pad sleeps, and whether anything short of physical
    interaction wakes it. Measured: once asleep it stops advertising entirely,
