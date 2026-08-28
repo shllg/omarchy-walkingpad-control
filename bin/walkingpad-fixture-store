@@ -1,0 +1,237 @@
+#!/usr/bin/python3
+"""Build a synthetic history store, for verifying the QML with no hardware.
+
+Charts §6 records that the analysis window and the popup chart are verified
+"through a `qs -p` harness against a synthetic store". That store was built by
+hand and thrown away, so the verification was real but not reproducible, and
+every later QML change had to re-do it. This is that store, committed.
+
+WHY IT DRIVES THE REAL Store RATHER THAN WRITING JSONL
+------------------------------------------------------
+Hand-written rows drift from what the bridge actually writes, and a fixture that
+drifts is worse than no fixture: the window would be verified against a shape
+that never occurs. Every row here is produced by walkingpad.store.Store from
+Status frames, through exactly the path the bridge uses, so the attribution
+invariants of design §1.2 and §1.4 hold in the output by construction rather
+than by the author remembering them.
+
+Nothing here touches a pad, a radio or the network. It only writes files, into a
+directory named on the command line -- never a default, and never the real store.
+"""
+
+import argparse
+import os
+import sys
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from walkingpad.frames import Status
+from walkingpad.store import DEFAULT_STORE_DIR, LINK_GAP_S, Store
+
+SECONDS_PER_DAY = 86400
+# The pad reports distance in 10 m steps and roughly 1300 steps per km at a
+# normal walking cadence; both only matter here so the generated numbers read
+# like a real walk rather than round arithmetic.
+KM_PER_HOUR_TO_KM_PER_S = 1.0 / 3600.0
+STEPS_PER_KM = 1300
+
+
+class Clock:
+    """The wall clock Store reads, driven forward by the script below."""
+
+    def __init__(self, wall):
+        self.wall = float(wall)
+
+    def __call__(self):
+        return self.wall
+
+    def advance(self, seconds):
+        self.wall += float(seconds)
+        return self.wall
+
+
+class Pad:
+    """The pad's three cumulative counters, which only ever rise.
+
+    Design §1.4 detects an epoch reset from ANY counter going backwards, so a
+    fixture that let one drift down would silently generate a reset nobody asked
+    for. Keeping them here, monotonic, is what stops that.
+
+    ⚠ Accumulate at full precision and quantise only when a frame is built. The
+    pad reports distance in 10 m units, but one second at 3 km/h is 0.83 m and
+    one second at 2.5 km/h is 0.9 of a step: rounding each tick before adding it
+    floors every increment to zero, and the first version of this file generated
+    a whole week of walks with dist_km 0.00 and, on the slower ones, no steps at
+    all. Quantisation belongs at the report boundary, which is where the real pad
+    does it too.
+    """
+
+    def __init__(self):
+        self._elapsed_s = 0.0
+        self._dist_km = 0.0
+        self._steps = 0.0
+
+    def walk(self, seconds, speed_kmh):
+        distance = speed_kmh * KM_PER_HOUR_TO_KM_PER_S * seconds
+        self._elapsed_s += seconds
+        self._dist_km += distance
+        self._steps += distance * STEPS_PER_KM
+
+    def status(self, belt, speed_kmh=0.0, mode="manual"):
+        return Status(
+            belt=belt,
+            speed_kmh=speed_kmh,
+            set_speed_kmh=0.0,
+            mode=mode,
+            elapsed_s=int(self._elapsed_s),
+            distance_km=round(self._dist_km, 2),
+            steps=int(self._steps),
+        )
+
+
+def poll(store, clock, pad, belt, speed_kmh=0.0, seconds=1):
+    """Record `seconds` of 1 Hz frames, the cadence the bridge actually polls at."""
+    for _ in range(int(seconds)):
+        if belt == "running":
+            pad.walk(1, speed_kmh)
+        store.record(pad.status(belt, speed_kmh), None, None)
+        clock.advance(1)
+
+
+def walk(store, clock, pad, minutes, speed_kmh):
+    """One ordinary walk: countdown, ramp, cruise, stop, and the idle tail.
+
+    The 3-2-1 countdown is `belt` 9/8/7 mapped to "starting" (AGENTS.md fact 14)
+    and the pad ramps about 0.25 km/h per second (fact 2), so a fixture that
+    jumped straight to cruise would never exercise the ramp end of §2.2's stored
+    curve -- which is precisely the part the tail exists to capture.
+    """
+    poll(store, clock, pad, "starting", 0.0, 4)
+    ramp = max(1, int(speed_kmh / 0.25))
+    for step in range(ramp):
+        poll(store, clock, pad, "running", round(0.25 * (step + 1), 2), 1)
+    poll(store, clock, pad, "running", speed_kmh,
+         max(1, int(minutes * 60) - 4 - ramp))
+    poll(store, clock, pad, "stopped", 0.0, 3)
+    poll(store, clock, pad, "idle", 0.0, 8)
+
+
+def link_gap(store, clock, pad, minutes, speed_kmh):
+    """Walking the pad saw while nothing was connected to it.
+
+    Design §1.4: a gap longer than LINK_GAP_S cannot be claimed as an observed
+    bout, so the counter delta across it is written as `observed: false`. The
+    window has to render a period whose only activity is one of these (charts
+    §6), and it can only do that if a fixture contains one.
+    """
+    poll(store, clock, pad, "idle", 0.0, 2)
+    clock.advance(LINK_GAP_S + minutes * 60)
+    pad.walk(int(minutes * 60), speed_kmh)
+    poll(store, clock, pad, "idle", 0.0, 2)
+
+
+def build(store_dir, anchor):
+    """Write one week of history ending at `anchor`.
+
+    The days are not interchangeable. Each one exists to put a specific shape in
+    front of the window, and charts §6 names most of them.
+    """
+    clock = Clock(anchor - 6 * SECONDS_PER_DAY)
+    pad = Pad()
+    store = Store(store_dir, now=clock)
+
+    def start_of_day(offset, hour):
+        clock.wall = anchor - offset * SECONDS_PER_DAY
+        day = datetime.fromtimestamp(clock.wall, timezone.utc)
+        clock.wall = day.replace(
+            hour=0, minute=0, second=0, microsecond=0).timestamp() + hour * 3600
+
+    # Six days back: one plain walk, so week and month periods have a floor that
+    # is neither empty nor the busiest day.
+    start_of_day(6, 9)
+    walk(store, clock, pad, 12, 3.0)
+
+    # Five days back: two walks hours apart. §1.3 groups bouts into sessions by
+    # a gap, so this is the day that proves the grouping is not per-day.
+    start_of_day(5, 8)
+    walk(store, clock, pad, 9, 2.5)
+    start_of_day(5, 17)
+    walk(store, clock, pad, 22, 3.5)
+
+    # Four days back: NOTHING observed, only a link gap. Charts §6 asks for a
+    # period whose only activity is an unobserved bout; selecting this day is
+    # how the window's "no drawable samples" path gets exercised for real.
+    start_of_day(4, 12)
+    link_gap(store, clock, pad, 18, 3.2)
+
+    # Three days back: a single long walk, the shape the popup chart is for.
+    start_of_day(3, 7)
+    walk(store, clock, pad, 35, 4.0)
+
+    # Two days back: nothing at all. An empty day inside a populated week is its
+    # own case -- charts §2.4 has to place an omitted bucket rather than a zero.
+    # Deliberately no calls.
+
+    # Yesterday: stop and restart inside one session. Fact 16 makes stop/start a
+    # single toggle opcode, and design §1.4 makes this two observed bouts with
+    # no residual between them, which is the invariant most worth seeing drawn.
+    start_of_day(1, 18)
+    walk(store, clock, pad, 6, 2.0)
+    poll(store, clock, pad, "idle", 0.0, 20)
+    walk(store, clock, pad, 11, 3.0)
+
+    # Today: one walk in the morning and one gap-attributed stretch, so "Today"
+    # is never empty and always contains both kinds of bout.
+    start_of_day(0, 8)
+    walk(store, clock, pad, 16, 3.0)
+    start_of_day(0, 13)
+    link_gap(store, clock, pad, 7, 2.8)
+
+    store.close_open_bout()
+    return store
+
+
+def parse_anchor(value):
+    if value is None:
+        return datetime.now(timezone.utc).timestamp()
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be an ISO 8601 date or date-time") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Write a synthetic WalkingPad history store")
+    # Positional and required. A default would eventually be typed by someone in
+    # a hurry, and the only plausible default is the directory holding the real
+    # history -- see the refusal below.
+    parser.add_argument("directory",
+                        help="where to write the store (must not be the real one)")
+    parser.add_argument("--anchor", default=None,
+                        help="ISO 8601 instant the newest day ends at "
+                             "(default: now; pass one to make output reproducible)")
+    parser.add_argument("--force", action="store_true",
+                        help="write into a directory that already has content")
+    args = parser.parse_args(argv)
+
+    target = os.path.abspath(os.path.expanduser(args.directory))
+    if target == os.path.abspath(DEFAULT_STORE_DIR):
+        parser.error("refusing to write over the real history store")
+    if os.path.isdir(target) and os.listdir(target) and not args.force:
+        parser.error(f"{target} is not empty; pass --force to write into it")
+
+    anchor = parse_anchor(args.anchor)
+    build(target, anchor)
+    print(f"wrote a synthetic store to {target}")
+    print(f"  point the QML at it with:  XDG_STATE_HOME={os.path.dirname(target)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

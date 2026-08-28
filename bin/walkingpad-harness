@@ -1,0 +1,217 @@
+#!/bin/bash
+#
+# Render the QML with no pad, no radio and no real history.
+#
+# Charts §6 says the analysis window is verified "through a `qs -p` harness
+# against a synthetic store plus offscreen renders". That harness was never
+# committed, so the verification was real but had to be rebuilt by hand for
+# every later change. This is it.
+#
+# ⚠ TWO THINGS THIS HAS TO GET RIGHT, both of which cost time to rediscover.
+#
+# 1. At RUNTIME quickshell maps `qs` onto the config root itself, so `qs.Ui`
+#    resolves to <config root>/Ui -- not <config root>/qs/Ui. The config root
+#    therefore has to look like $OMARCHY_PATH/shell, which is why its children
+#    are linked in individually below.
+#    ⚠ This is NOT the same convention qmllint uses. bin/check-repo builds a
+#    directory literally named `qs` for the linter, and that is correct there.
+#    Copying either arrangement to the other end fails with "module qs.Ui is not
+#    installed", which is how this was found.
+#
+# ⚠ WHAT --offscreen CAN AND CANNOT TELL YOU. Both entry points are built on
+# PanelWindow, which needs the Wayland layer-shell backend. Under the offscreen
+# platform that type cannot be created, the component finishes in Error, and
+# nothing inside it ever runs -- no open(), no query, no binding. So --offscreen
+# verifies that the QML PARSES and that every type and import RESOLVES, which is
+# worth having and is what caught "WalkingpadBarChart is not a type". It does NOT
+# verify data, bindings or layout. Those need a real display, which is what this
+# script does by default.
+# 2. The entry point is loaded by its ABSOLUTE path in the repository, not
+#    through a link inside the config root. Two things depend on that. Sibling
+#    components like WalkingpadBarChart resolve against the loaded file\'s own
+#    directory, and WalkingpadWindow.qml finds the query tool with
+#    Qt.resolvedUrl("bin/walkingpad-stats"), also relative to itself. Loading it
+#    through a linked copy gives "WalkingpadBarChart is not a type".
+#
+# The links live in a temporary directory that is deleted on exit. Nothing here
+# is ever committed: one tracked symlink makes the Omarchy validator reject the
+# whole plugin for every user (AGENTS.md, plugin boundary).
+
+set -euo pipefail
+
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+target="window"
+store=""
+offscreen=0
+timeout_s=0
+mode="period"
+period="day"
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: walkingpad-harness [--panel|--window] [--store DIR] [--offscreen] [--timeout N]
+
+  --window      render WalkingpadWindow.qml, the analysis window (default)
+  --panel       render WalkingpadPanel.qml, the bar widget and its popup
+  --store DIR   history store to read; the directory itself, ending in
+                .../walkingpad. Default: a fresh synthetic one, discarded on exit.
+  --real-store  read the REAL history instead of a synthetic one
+  --offscreen   parse and resolve types only, with no window. Cannot reach
+                data or bindings: PanelWindow needs the Wayland backend.
+  --timeout N   exit after N seconds instead of running until closed
+  --mode M      period (default) or session. Charts §2 keeps the two from
+                competing, so they are separate modes and each needs rendering.
+                session selects the newest one, which offscreen cannot click.
+  --period P    day (default), week or month
+USAGE
+  exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --window) target="window"; shift ;;
+    --panel) target="panel"; shift ;;
+    --store) store=${2:-}; [[ -n $store ]] || usage; shift 2 ;;
+    --real-store) store="${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad"; shift ;;
+    --offscreen) offscreen=1; shift ;;
+    --mode) mode=${2:-}; [[ $mode == period || $mode == session ]] || usage; shift 2 ;;
+    --period) period=${2:-}; [[ -n $period ]] || usage; shift 2 ;;
+    --timeout) timeout_s=${2:-0}; shift 2 ;;
+    -h|--help) usage ;;
+    *) echo "unknown argument: $1" >&2; usage ;;
+  esac
+done
+
+command -v qs >/dev/null 2>&1 || { echo "harness: FAIL — qs (quickshell) is not installed" >&2; exit 1; }
+omarchy_shell=${OMARCHY_PATH:-/usr/share/omarchy}/shell
+[[ -d $omarchy_shell ]] || { echo "harness: FAIL — $omarchy_shell is not present, so qs.* cannot resolve" >&2; exit 1; }
+
+root=$(mktemp -d)
+cleanup() { rm -rf "$root"; }
+trap cleanup EXIT
+
+# The config root must BE the shell, so link the shell's own children in. The
+# harness entry point is called harness.qml precisely so it cannot collide with
+# the shell's shell.qml, which is one of the names arriving here.
+for child in "$omarchy_shell"/*; do
+  [[ -e $child ]] || continue
+  ln -s "$child" "$root/$(basename "$child")"
+done
+
+if [[ -z $store ]]; then
+  store="$root/state/walkingpad"
+  "$repo/bin/walkingpad-fixture-store" "$store" >/dev/null
+  echo "harness: generated a synthetic store at $store"
+fi
+[[ -d $store ]] || { echo "harness: FAIL — store directory $store does not exist" >&2; exit 1; }
+
+# walkingpad-stats reads XDG_STATE_HOME and appends "walkingpad"; the window
+# never passes --store, so redirecting the environment is what points the whole
+# read path at a fixture without touching a line of shipped QML.
+export XDG_STATE_HOME
+XDG_STATE_HOME=$(dirname "$store")
+
+if [[ $offscreen -eq 1 ]]; then
+  export QT_QPA_PLATFORM=offscreen
+fi
+
+# The stub `shell` and `manifest` stand in for what the bar and the plugin loader
+# inject at runtime. They carry only what the two entry points actually read; a
+# fuller fake would be a second implementation of the shell to keep in step.
+cat > "$root/harness.qml" <<QML
+import QtQuick
+import Quickshell
+import qs.Commons
+import qs.Ui
+
+ShellRoot {
+  id: harness
+
+  readonly property var fakeManifest: ({
+    id: "io.github.shllg.walkingpad",
+    barWidget: { defaults: { gapMinutes: 5 } }
+  })
+
+  // No bridge is started, so the service stays null and every belt control
+  // renders its disconnected state. That is the point: this harness is for the
+  // read side, and charts §7 forbids it writing to a pad at all.
+  readonly property var fakeShell: ({ })
+
+  // Session mode is normally reached by clicking a session, which an offscreen
+  // render cannot do. Sessions arrive asynchronously from bin/walkingpad-stats,
+  // so wait for the list rather than reading it once and finding it empty.
+  function enterMode(item) {
+    if ("$mode" !== "session" || item.sessions === undefined) return
+    if (item.sessions.length > 0) {
+      item.selectSession(item.sessions[0])
+      console.log("harness: selected session", item.sessions[0].start)
+      return
+    }
+    sessionWait.item = item
+    sessionWait.restart()
+  }
+
+  Timer {
+    id: sessionWait
+    property var item: null
+    interval: 250
+    repeat: true
+    triggeredOnStart: false
+    property int attempts: 0
+    onTriggered: {
+      attempts += 1
+      if (item && item.sessions.length > 0) {
+        stop()
+        item.selectSession(item.sessions[0])
+        console.log("harness: selected session", item.sessions[0].start)
+      } else if (attempts > 40) {
+        stop()
+        console.log("harness: no sessions arrived; nothing to select")
+      }
+    }
+  }
+
+  Loader {
+    id: entryPoint
+    active: true
+
+    // Silence here is not success. Under --offscreen the component fails and
+    // onLoaded never runs, which looked exactly like a window with no data
+    // until this said so out loud.
+    onStatusChanged: {
+      if (status === Loader.Error) {
+        console.warn("harness: the entry point FAILED to load.")
+        console.warn("harness: if this is --offscreen, that is expected --"
+                     + " PanelWindow needs the Wayland backend. Drop --offscreen.")
+      }
+    }
+    source: "file://$repo/Walkingpad$([[ $target == panel ]] && echo Panel || echo Window).qml"
+    onLoaded: {
+      item.manifest = harness.fakeManifest
+      item.shell = harness.fakeShell
+      // ⚠ NOT hasOwnProperty. A QML-declared property is not an own property of
+      // the JS wrapper, so every hasOwnProperty guard here silently returned
+      // false and none of this ran -- including opened, which gates every query
+      // the window issues. The window rendered empty and looked like a data bug.
+      // ⚠ Call open(), do not assign opened. The window's open() sets the flag
+      // AND kicks refreshProfile()/refreshSessions(); assigning the property
+      // only flips a boolean, so the window renders with no data at all and
+      // looks like an empty store rather than a harness that never asked.
+      if (typeof item.open === "function") item.open()
+      else if (item.opened !== undefined) item.opened = true
+      if (item.period !== undefined) item.period = "$period"
+      harness.enterMode(item)
+    }
+  }
+}
+QML
+
+echo "harness: rendering the $target against $store"
+if [[ $timeout_s -gt 0 ]]; then
+  timeout "$timeout_s" qs -p "$root/harness.qml" || status=$?
+  # 124 is timeout's own "the deadline arrived", which is success here.
+  [[ ${status:-0} -eq 0 || ${status:-0} -eq 124 ]] || exit "${status}"
+else
+  qs -p "$root/harness.qml"
+fi

@@ -282,8 +282,19 @@ relaxed.
   samples, the three-zone keyboard path including that Enter reaches no belt
   command outside the control zone, degenerate chart input, and a binding-skew
   stress that reproduced 8 TypeErrors before the fix and 0 after.
-- **Still by hand, and still open:** the popup chart during a real walk, and both
-  window modes against real accumulated history rather than a synthetic store.
+- ✅ **The harness is committed** (2026-08-28). `bin/walkingpad-fixture-store`
+  generates a week of history by driving the real `walkingpad.store.Store`, and
+  `bin/walkingpad-harness` renders either entry point against it or against real
+  history. What used to be rebuilt by hand for every change is now one command.
+  ⚠ `--offscreen` verifies only that the QML parses and that every type resolves.
+  Both entry points are built on `PanelWindow`, which needs the Wayland backend;
+  offscreen it fails to instantiate and nothing inside ever runs, so data and
+  bindings need a real display.
+- ✅ **Both window modes against real accumulated history: DONE** (2026-08-28),
+  against 19 observed bouts. Period and session mode both loaded, queried and
+  selected with zero QML errors, and both render the synthetic store as well.
+- **Still by hand, and still open:** the popup chart during a real walk. It needs
+  a moving belt, so it belongs with the smoke test rather than here.
 - `bin/check-repo` must stay green, including the real plugin validator and the
   QML lint. ⚠ That lint was hollow until 2026-08-26: `/usr/bin/qmllint` is the
   Qt 5 binary and exits 255 silently on Qt 6 QML, and `-I $OMARCHY_PATH/shell`

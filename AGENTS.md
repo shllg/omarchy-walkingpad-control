@@ -151,8 +151,12 @@ Python precisely so it can be tested; do not move it into QML, which cannot be.
 
 The QML can also be exercised without hardware. `bin/walkingpad-bridge --replay
 fixtures/c2-fw6.1.2.jsonl` plays captured frames through the transport seam, and
-a `qs -p` harness pointed at a copy of the service will drive the whole stdout
-parse, command channel and debounce with no radio involved. `pytest` is a dev-only dependency (`python-pytest`); the
+**`bin/walkingpad-harness` renders either entry point** against a synthetic store
+that `bin/walkingpad-fixture-store` generates by driving the real `Store`, so the
+fixture is what the bridge actually writes rather than hand-rolled rows.
+⚠ Its `--offscreen` mode proves only that the QML parses and that types resolve:
+`PanelWindow` needs the Wayland backend, so offscreen the entry point fails to
+instantiate and nothing inside it runs. Data and bindings need a real display. `pytest` is a dev-only dependency (`python-pytest`); the
 bridge itself does not need it.
 
 Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing
