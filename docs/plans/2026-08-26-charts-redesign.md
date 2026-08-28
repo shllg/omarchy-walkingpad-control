@@ -1,4 +1,4 @@
-# Charts redesign — popup, analysis window, rendering (Stage 3.1) — design spec
+# Charts redesign — popup, analysis window, rendering (Stage 3.1) — decisions
 
 **Goal:** make the popup carry one chart that tells you something its numbers
 cannot, restructure the analysis window so period and session never compete, and
@@ -8,10 +8,11 @@ replace the chart rendering with primitives that look like the rest of the shell
 the storage model, the attribution rules and the query tool's existing contract in
 §1–§3 are untouched and still govern.
 
-**Status:** implemented 2026-08-26. Section numbers are frozen — 15 of them are
-cited by name from comments in the QML, `WalkingpadModel.js` and
-`bin/walkingpad-stats`, so a renumber would orphan those citations. Nothing here
-writes to the pad; this remains a read-side concern end to end.
+**Status:** implemented 2026-08-26. Reduced on 2026-08-28 to the decisions its
+section numbers are cited by and the work still open; what was built is in the
+code. **Section numbers are frozen** — 15 of them are cited by name from comments
+in the QML, `WalkingpadModel.js` and `bin/walkingpad-stats`, so a renumber
+orphans those citations. That includes the numbered items in §0.
 
 ---
 
@@ -19,19 +20,16 @@ writes to the pad; this remains a read-side concern end to end.
 
 Recorded so the fixes are not re-litigated later.
 
-1. **Cumulative rows carried no information.** Distance and steps only ever rise,
-   and each terminated at a number printed in text directly beside it. Two of the
-   four popup rows were redundant by construction.
-2. **Speed-over-time was in the wrong place.** In a bar popup the large readout
-   already states the current speed, and the history is not actionable mid-walk.
-   It belongs where someone is studying a walk, not glancing at one.
+1. **Cumulative rows carried no information.** Distance and steps only rise, and
+   each terminated at a number printed in text beside it.
+2. **Speed-over-time was in the wrong place.** The popup's large readout already
+   states the current speed, and the history is not actionable mid-walk.
 3. **Period and session selection competed.** Both were on screen, both drove the
    same chart, and nothing said which had won.
-4. **A navigation control was put in the belt-control row.** Start, Stop, −, + and
-   Set act on the treadmill; Stats navigates. Adding a sixth cell shrank every
-   real control from ~63 px to ~52 px against ~55 px of content, in a component
-   with neither `elide` nor `clip`. The width was the symptom; the category error
-   was the cause.
+4. **A navigation control was put in the belt-control row.** Start, Stop, −, +
+   and Set act on the treadmill; Stats navigates. The sixth cell shrank every
+   real control to ~52 px against ~55 px of content, in a component with neither
+   `elide` nor `clip`. The width was the symptom; the category error was the cause.
 5. **Canvas was the wrong primitive for bars.** Hand-stroked rectangles look
    muddy next to the rest of the shell.
 
@@ -39,102 +37,79 @@ Recorded so the fixes are not re-litigated later.
 
 ## 1. The popup chart
 
-**One chart: steps per minute, on a real wall-clock axis.**
+**One chart: steps per minute, on a real wall-clock axis.** 60 fixed one-minute
+buckets aligned to wall-clock minutes, newest at the right — the axis is always
+the last hour, matching the ring buffer's own bound.
 
-- **60 fixed one-minute buckets**, aligned to wall-clock minutes, newest at the
-  right. The axis is always the last hour, matching the ring buffer's own bound.
 - **A minute with no walking draws no bar.** The gap is the information: it says
-  you were at the desk and not moving. This is why the axis must be real time and
+  you were at the desk and not moving. That is why the axis must be real time and
   not sample index.
-- **The in-progress minute renders distinctly** (reduced opacity). A bucket that
-  is still filling would otherwise read as a slowdown.
-- Steps, not distance: the pad quantises distance to 10 m, so a minute at
+- **The in-progress minute renders distinctly.** A bucket still filling would
+  otherwise read as a slowdown.
+- **Steps, not distance.** The pad quantises distance to 10 m, so a minute at
   2.5 km/h advances roughly four quanta and the bars would be visibly steppy.
   Steps is an integer counter with real resolution.
-- Bar height scales to the tallest bucket in view, with the peak value labelled.
-  No y-axis furniture beyond that.
 
-**Data source is the existing in-memory ring buffer.** Steps per bucket is the
-difference in the cumulative `s` field across bucket edges. The popup performs no
-file I/O — that constraint is unchanged and load-bearing.
-
-The buffer only records while the belt is `starting` or `running` plus a 5 s tail,
-so a pause produces a gap in sample timestamps, which is exactly what the empty
-buckets are derived from. No extra state is needed.
-
-**Written values are unchanged.** They were right.
+**Data source is the existing in-memory ring buffer, and the popup performs no
+file I/O.** That constraint is unchanged and load-bearing. The buffer only records
+while the belt is `starting` or `running` plus a 5 s tail, so a pause produces a
+gap in sample timestamps — which is exactly what the empty buckets are derived
+from. No extra state is needed.
 
 ---
 
 ## 2. The analysis window
 
+A left rail and a right pane, restructured around one rule: **exactly one thing is
+selected at a time.**
+
 ### 2.1 Layout
-
-A left rail and a right pane. Exactly one thing is selected at a time.
-
-```
-┌────────────────────────────────────────────────┐
-│ WalkingPad · History                      [×]  │
-├──────────────┬─────────────────────────────────┤
-│ ● TODAY      │  Today — all sessions combined  │
-│   Week       │                                 │
-│   Month      │  2.41 km   4812 steps   38:20   │
-│   All time   │  avg 2.5 km/h                   │
-│              │  + 12 min unobserved            │
-│ SESSIONS     │                                 │
-│  09:04 18min │  …charts…                       │
-│  11:20 12min │                                 │
-└──────────────┴─────────────────────────────────┘
-```
 
 - Period tabs scope the rail; the session list below shows the sessions inside the
   selected period.
-- **Default is Today, combined.** No session selected.
-- Selecting a session swaps the right pane and the header reads
-  `Session · 09:04 – 09:22`. Selecting a period clears the session.
-- The header always names what is displayed. That is what removes the ambiguity;
-  the layout alone would not.
+- **Default is Today, combined**, with no session selected.
+- Selecting a session swaps the right pane; selecting a period clears the session.
+- **The header always names what is displayed.** That is what removes the
+  ambiguity; the layout alone would not.
 
 ### 2.2 Period mode — the default
 
-| Chart | What it answers | Data |
-|---|---|---|
-| Steps per bucket (bars, real time axis) | When you moved, and how much | `profile.buckets[].steps` |
-| Speed over time (area, gaps preserved) | Which speeds you actually used | `profile.buckets[].v_avg` |
-| Time at speed (horizontal bars) | Whether you held a speed or drifted | `profile.speed_histogram` |
+Three charts: steps per bucket, speed over time, and time at speed.
 
-⚠ **Period mode never loads raw samples.** All three charts read the bucketed
-`profile` object from §4. The speed area in this mode is therefore a curve through
-per-bucket averages, not a per-second trace — a day holds up to 86 400 samples and
-pulling them into QML would put exactly the unbounded work on the UI thread that
-§3.2 of the previous spec exists to prevent. The per-second trace is what session
-mode is for.
+⚠ **Period mode never loads raw samples.** All three read the bucketed `profile`
+object from §4. The speed curve in this mode is therefore a line through
+per-bucket averages, not a per-second trace — a day holds up to 86 400 samples,
+and pulling them into QML would put exactly the unbounded work on the UI thread
+that the previous spec's §3.2 exists to prevent. The per-second trace is what
+session mode is for.
 
 ### 2.3 Session mode — one walk
 
-| Chart | What it answers |
-|---|---|
-| Speed (filled area, commanded and goal as thin overlays) | The ramp. Fact 2: reported speed is ACTUAL and the pad ramps ~0.25 km/h per second with no ACK anywhere — the gap between commanded and actual *is* that ramp, and splitting them into separate rows would hide the one thing worth seeing |
-| Cadence (smoothed line) | Effort, independent of belt speed. Derived, never reported |
-| Steps per minute (bars) | Same visual language as the popup, so the two read as one system |
+Speed, cadence and steps-per-minute for a single walk.
+
+**Commanded and goal overlay the speed area rather than getting their own rows.**
+Fact 2: reported speed is ACTUAL and the pad ramps ~0.25 km/h per second with no
+ACK anywhere, so the gap between commanded and actual *is* that ramp. Splitting
+them into separate rows hides the one thing worth seeing.
 
 Written values sit above the charts in both modes, with the unobserved share
-stated separately. `observed: false` marks provenance, not accuracy: the residual
-makes the totals exact; what is missing is samples and placement.
+stated separately. **`observed: false` marks provenance, not accuracy:** the
+residual makes the totals exact; what is missing is samples and placement.
 
 ### 2.4 Bucket selection
 
 Deterministic, from a fixed ladder: 1 min, 5 min, 15 min, 1 h, 6 h, 1 day, 1 week.
-Pick the smallest rung whose resulting bar count is at most 120, targeting roughly
-60. The axis spans the data's actual extent within the period — first activity to
+Pick the smallest rung whose bar count is at most 120, targeting roughly 60.
+
+**The axis spans the data's actual extent within the period** — first activity to
 last — not the full calendar span. A day with two walks between 09:00 and 14:00
 draws five hours of axis, not twenty-four hours of mostly nothing.
 
-### 2.5 Removed from v1
+### 2.5 Out of scope
 
-Cumulative distance and cumulative steps as chart rows, in both modes. They rise
-monotonically to a number printed above them. Also still out of scope, unchanged
-from the previous spec: calendar heatmap, goals, export, cross-session comparison.
+Cumulative distance and cumulative steps as chart rows, in either mode: they rise
+monotonically to a number printed above them. Also still out, unchanged from the
+previous spec: calendar heatmap, goals, export, cross-session comparison.
 
 ---
 
@@ -144,25 +119,20 @@ from the previous spec: calendar heatmap, goals, export, cross-session compariso
 
 A bar chart is rectangles. A `Repeater` of `Rectangle`s gives crisp edges at any
 DPI, takes theme colours directly, animates for free, and needs no repaint
-plumbing or manual antialiasing. This is the single largest visual improvement
-available and it also removes code.
+plumbing or manual antialiasing. It also removes code.
 
 ### 3.2 Curves use `QtQuick.Shapes`
 
-Verified present at `/usr/lib/qt6/qml/QtQuick/Shapes` and already used by
-first-party Omarchy UI — `Ui/SpeedTestOverlay.qml`, `Ui/BorderOverlay.qml`,
-`plugins/background/Background.qml`. **Not a new dependency:** it ships with Qt 6
-and the shell already imports it, so the no-third-party-runtime-dependency
+**Not a new dependency:** it ships with Qt 6 and the shell already imports it
+(`Ui/SpeedTestOverlay.qml`, `Ui/BorderOverlay.qml`,
+`plugins/background/Background.qml`), so the no-third-party-runtime-dependency
 constraint holds.
-
-Antialiased vector paths with real joins and caps, and a gradient fill for the
-speed area.
 
 ### 3.3 Aesthetic rules
 
 - No box around the plot. A baseline, and at most two faint horizontal guides.
 - Axis labels outside the plot, small and muted, never overlaying data.
-- Real padding. The shipped charts crowd their own edges.
+- Real padding. The shipped charts crowded their own edges.
 - Corner radius from `Style.cornerRadius`, which mirrors Hyprland's `rounding`
   and is `0` on the current theme. Never a literal.
 
@@ -176,129 +146,89 @@ speed area.
 
 ### 3.5 Component split
 
-`WalkingpadChartStack.qml` is deleted. It is 857 lines doing four row types,
-background bands and cursor handling at once, and rewriting it as one monolith
-would repeat the mistake.
+`WalkingpadChartStack.qml` was deleted — 857 lines doing four row types,
+background bands and cursor handling at once. Rewriting it as one monolith would
+have repeated the mistake. It became `WalkingpadBarChart.qml` (bucketed bars,
+Rectangles only, used by the popup and both window modes) and
+`WalkingpadTimeChart.qml` (continuous series, `QtQuick.Shapes`, window only).
 
-| Component | Job |
-|---|---|
-| `WalkingpadBarChart.qml` | Bucketed bars on a time axis. Rectangles only. Used by the popup and both window modes |
-| `WalkingpadTimeChart.qml` | Continuous series on a time axis — speed area with overlays, cadence line. `QtQuick.Shapes`. Window only |
-
-**Both keep the rules that were already load-bearing:**
+**The rules that are load-bearing, and are why the split is shaped this way:**
 
 - They own **no colour** and import no palette. `fg`, `accent` and `muted` arrive
   as properties. This is forced, not stylistic: the panel loader injects `service`
   but not `bar` (`shell.qml:629-637`), so the window cannot use the bar palette
   while the popup already does. A component importing either would be unusable in
-  one of its two homes.
-- Sizes arrive as properties too, and callers pass `Style.space(...)` values.
-- `WalkingpadTimeChart` keeps **one** `MouseArea` spanning the whole chart, mapping
-  `mouseX` to a sample index. Per-row mouse areas produce N cursors that must then
-  be kept in sync; that bug is avoided by construction, not by discipline.
+  one of its two homes. Sizes arrive as properties too.
+- `WalkingpadTimeChart` keeps **one** `MouseArea` spanning the whole chart. Per-row
+  mouse areas produce N cursors that must then be kept in sync; that bug is avoided
+  by construction, not by discipline.
 - Neither owns its cursor index. They render what they are given and emit
   `cursorMoved`.
 - Degenerate input renders an empty frame and never throws: empty data, one point,
   zero range, a null entry, non-monotonic time.
 - Lines break across a gap larger than the sampling cadence and across an epoch
   change. A line drawn across an unobserved interval is a line that did not
-  happen, and §10's rule stands: inventing numbers is worse than showing a gap.
+  happen, and stats §10's rule stands: inventing numbers is worse than showing a
+  gap.
 
 ---
 
-## 4. The query tool gains one subcommand
+## 4. The query tool's `profile` subcommand
 
-The period pane needs steps per bucket across a whole day. Scanning a day of
-samples is unbounded work, and §3.2 of the previous spec keeps unbounded work out
-of both the bridge and the UI thread. So the bucketing happens in Python.
+The period pane needs steps per bucket across a whole day. **Scanning a day of
+samples is unbounded work, and that must not land in the bridge or on the UI
+thread**, so the bucketing happens in Python — one pass over the sample files in
+range, one JSON object out. `--bucket auto` applies §2.4's ladder server-side and
+reports what it chose. Run `walkingpad-stats profile --help` for the flags.
 
-```
-walkingpad-stats profile [--since ISO] [--until ISO] [--bucket auto|SECONDS]
-                         [--gap MIN] [--store PATH]
-```
-
-One JSON object, one pass over the sample files in range:
-
-```json
-{"bucket_s": 300,
- "start": 1756137600.0,
- "end": 1756155600.0,
- "buckets": [{"t": 1756137600.0, "steps": 412, "dist_km": 0.31,
-              "dur_s": 300, "v_avg": 2.5}],
- "speed_histogram": [{"kmh": 2.5, "dur_s": 700}],
- "totals": {"dur_s": 1183, "dist_km": 0.82, "steps": 1603, "v_avg": 2.5,
-            "unobserved_s": 0, "unobserved_dist_km": 0.0,
-            "unobserved_steps": 0}}
-```
-
-A bucket with no samples is **omitted**, not emitted as zero. The consumer draws
+**A bucket with no samples is omitted, not emitted as zero.** The consumer draws
 nothing there, and the distinction between "no data" and "measured zero" survives
 into the UI.
 
-`--bucket auto` applies §2.4's ladder server-side, and `bucket_s` reports what was
-chosen. Session mode keeps using the existing `session --start`, which already
-returns samples.
-
-Existing subcommands are unchanged.
+Session mode keeps using `session --start`, which already returns samples.
 
 ---
 
 ## 5. Popup controls
 
 **Stats leaves the control row** and becomes a small action at the right-hand end
-of the `CONTROL` section header, where a secondary navigation action belongs. The
-control row returns to five buttons at their original width and the overflow is
-gone — not clipped, not hidden behind a wider popup.
+of the `CONTROL` section header, where a secondary navigation action belongs
+(§0.4). The control row returns to five buttons at their original width.
 
-**Keyboard navigation becomes three zones**, extending the existing two-zone model:
-`stats` header → `chart` → `controls`. Vertical arrows move between zones,
-horizontal moves within one. Entering the chart zone seeds the cursor at the
-newest bucket; leaving it clears the cursor. The chart zone is unreachable when
-there is no data. `activateCursor()` stays gated so Enter can never fire a belt
-command from a non-control zone — that gate is safety-relevant and must not be
-relaxed.
+**Keyboard navigation is three zones:** `stats` header → `chart` → `controls`.
+Vertical arrows move between zones, horizontal within one. Entering the chart zone
+seeds the cursor at the newest bucket; leaving it clears the cursor. The zone is
+unreachable when there is no data.
 
-`blocked: root.editing` continues to hand keys to the Set editor while it is open.
+⚠ `activateCursor()` stays gated so Enter can never fire a belt command from a
+non-control zone. **That gate is safety-relevant and must not be relaxed.**
 
 ---
 
 ## 6. Testing
 
-- **Python:** the `profile` subcommand gets the same treatment as the others —
-  bucket ladder selection at boundaries, omitted-vs-zero buckets, an empty store,
-  a period with no samples, malformed rows skipped and counted, and exactly one
-  JSON object on stdout.
-- **Bucketing arithmetic** is in Python precisely so pytest can reach it (ADR D-1).
-  The popup's own 60-bucket derivation is the one copy in JS; it must agree with
-  the Python at bucket boundaries, and the boundary convention is stated in both.
+- **Bucketing arithmetic lives in Python precisely so pytest can reach it**
+  (ADR D-1). The popup's own 60-bucket derivation is the one copy in JS, and it
+  must agree with the Python at bucket boundaries; the convention is stated in
+  both.
   ⚠ They diverged on first implementation — 118 steps against 120 for the same
-  minute, because the query tool dropped the sample that opens the interval
-  crossing into the first bucket. Two tests now pin the agreement, including
-  across a UTC day-file boundary, which is where every "Today" query lands.
-- **QML has no unit harness**, so verification runs through a `qs -p` harness
-  against a synthetic store plus offscreen `qml6` renders. Covered that way:
-  both window modes, period switching, session selection and the return path, a
-  period whose only activity is an unobserved bout, a session with no drawable
-  samples, the three-zone keyboard path including that Enter reaches no belt
-  command outside the control zone, degenerate chart input, and a binding-skew
-  stress that reproduced 8 TypeErrors before the fix and 0 after.
-- ✅ **The harness is committed** (2026-08-28). `bin/walkingpad-fixture-store`
-  generates a week of history by driving the real `walkingpad.store.Store`, and
-  `bin/walkingpad-harness` renders either entry point against it or against real
-  history. What used to be rebuilt by hand for every change is now one command.
+  minute, because the query tool dropped the sample opening the interval that
+  crosses into the first bucket. Two tests now pin the agreement, including across
+  a UTC day-file boundary, which is where every "Today" query lands.
+- **QML has no unit harness.** `bin/walkingpad-fixture-store` generates a week of
+  history by driving the real `walkingpad.store.Store`, and `bin/walkingpad-harness`
+  renders either entry point against it or against real history.
   ⚠ `--offscreen` verifies only that the QML parses and that every type resolves.
   Both entry points are built on `PanelWindow`, which needs the Wayland backend;
   offscreen it fails to instantiate and nothing inside ever runs, so data and
   bindings need a real display.
-- ✅ **Both window modes against real accumulated history: DONE** (2026-08-28),
-  against 19 observed bouts. Period and session mode both loaded, queried and
-  selected with zero QML errors, and both render the synthetic store as well.
-- **Still by hand, and still open:** the popup chart during a real walk. It needs
-  a moving belt, so it belongs with the smoke test rather than here.
 - `bin/check-repo` must stay green, including the real plugin validator and the
   QML lint. ⚠ That lint was hollow until 2026-08-26: `/usr/bin/qmllint` is the
   Qt 5 binary and exits 255 silently on Qt 6 QML, and `-I $OMARCHY_PATH/shell`
   does not resolve `qs.*`. See the skills for the correct invocation.
+
+**Still open, and still by hand:** the popup chart during a real walk. It needs a
+moving belt, so it belongs with `docs/smoke-test.md` rather than here.
 
 ---
 
@@ -307,8 +237,6 @@ relaxed.
 - Nothing here writes to the pad. If an implementation step needs a command frame,
   the step is wrong.
 - The poll loop, `Safety`, the start sequence and the goal servo are untouched.
-- No hardcoded colour, size or radius anywhere, not even as a fallback.
-- No new runtime dependency. `QtQuick.Shapes` is part of Qt 6 and already used by
-  the shell.
-- No committed symlink; one makes the plugin uninstallable for every user.
-- No real device address in tracked content.
+- The rest — no hardcoded colour or size, no new runtime dependency, no committed
+  symlink, no real device address in tracked content — is `AGENTS.md`'s
+  "Hard constraints", which governs and is not restated here.

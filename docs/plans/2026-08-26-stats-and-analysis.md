@@ -5,10 +5,11 @@ form that survives the pad's own counter resets; draw the current session in the
 popup; and add a screen-centred window for analysing the history.
 
 **Status:** implemented. §4, §5.2 and §6.3 are superseded by
-`docs/plans/2026-08-26-charts-redesign.md`; §8 and §9 described work that is done
-and were removed on 2026-08-26. Section numbers are frozen — 13 of them are cited
-by name from comments in `walkingpad/store.py`, `bin/walkingpad-stats` and the QML,
-so a renumber would orphan those citations.
+`docs/plans/2026-08-26-charts-redesign.md`. Reduced on 2026-08-28 to the decisions
+its section numbers are cited by and the work still open; what was built is in the
+code. **Section numbers are frozen** — they are cited by name from comments in
+`walkingpad/store.py`, `walkingpad/bridge.py`, `bin/walkingpad-stats` and the QML,
+where they appear as `design §N`.
 
 **Spec:** `docs/design-spec.md` remains canonical for the bridge, the safety model
 and the plugin contract. Every measured protocol fact lives in `AGENTS.md`.
@@ -31,12 +32,10 @@ not per-session values. Measured properties:
 - `elapsed_s` counts **running time**, not awake time. Verified against
   `fixtures/c2-fw6.1.2.jsonl`: 1008 s at 2.5 km/h works out to 0.70 km and the frame
   reports 0.69 km, so the counter advances only while the belt moves.
-- The counters **survive a stop**. Operator observation, 2026-08-25: walk, stop for
-  twenty seconds, start again, and the counters continue rather than restarting.
-  ✅ **CAPTURED 2026-08-27** (`docs/smoke-test.md` §4e). Counters read 169/0.09/188
-  before a stop and 171/0.09/188 on the first `running` frame after the restart,
-  then climbed to 290/0.15/321. They continue rather than reset, so the model
-  below holds and `residual` stays meaningful across a stop.
+- The counters **survive a stop**. ✅ Captured 2026-08-27 (`docs/smoke-test.md` §4e):
+  169/0.09/188 before a stop, 171/0.09/188 on the first `running` frame after the
+  restart, then climbing to 290/0.15/321. They continue rather than reset, so the
+  model below holds and `residual` stays meaningful across a stop.
 - The counters **do reset**. Measured 2026-08-24: an awake, idle pad
   (`belt == 4`, `mode == standby`) reported every counter at zero
   (`docs/protocol-evidence.md`, "NEW PROTOCOL FACT — belt == 4"). The trigger is
@@ -121,43 +120,25 @@ link loss (end time = last frame's wall clock, not now), or on clean shutdown.
 
 ### 2.1 Location
 
-`${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/`
+`${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad/`, created with mode `0700`.
 
-Created with mode `0700`. **This is personal health data** — a record of when its
-owner is at their desk and moving — and it is the first thing this plugin has ever
-written to disk. It must never be created inside the plugin directory, which is a
-git clone that ships to users and which the shell watches with `inotifywait`
-(see the `sys.dont_write_bytecode` note in `bin/walkingpad-bridge`).
+**This is personal health data** — a record of when its owner is at their desk and
+moving — and it is the first thing this plugin ever wrote to disk. It must never be
+created inside the plugin directory, which is a git clone that ships to users and
+which the shell watches with `inotifywait` (see the `sys.dont_write_bytecode` note
+in `bin/walkingpad-bridge`).
 
 Override with `--store PATH` on the bridge, which is how tests point it at `tmp_path`.
 
 ### 2.2 `samples/YYYY-MM-DD.jsonl`
 
-One row per frame while recording. Short keys, roughly 90 bytes per row.
+One row per frame while recording, roughly 90 bytes. `store.py` owns the field list.
 
-```json
-{"t":1756137600.1,"e":7,"b":"running","m":"manual","v":2.5,"c":2.5,"g":3.0,
- "d":0.69,"s":1314,"pe":1008}
-```
-
-| key | meaning |
-|---|---|
-| `t` | wall clock, epoch seconds, float |
-| `e` | epoch id |
-| `b` | belt state as decoded by `frames.py` |
-| `m` | mode |
-| `v` | actual belt speed, km/h |
-| `c` | commanded speed, or `null` |
-| `g` | standing goal, or `null` |
-| `d` | pad cumulative distance, km |
-| `s` | pad cumulative steps |
-| `pe` | pad cumulative `elapsed_s` |
-
-`d`, `s` and `pe` are the pad's **cumulative** values, stored raw rather than as
-deltas. Deliberate: the residual stays recomputable from the sample file itself, so a
-bug in today's attribution logic is repairable tomorrow from evidence that was never
-thrown away. It also means a lost or stale `state.json` can be rebuilt by replaying
-the samples.
+**`d`, `s` and `pe` are the pad's cumulative values, stored raw rather than as
+deltas.** Deliberate: the residual stays recomputable from the sample file itself, so
+a bug in today's attribution logic is repairable tomorrow from evidence that was
+never thrown away. It also means a lost or stale `state.json` can be rebuilt by
+replaying the samples.
 
 **Recording window.** Record while `belt` is `"starting"` or `"running"`, and for
 `TAIL_S = 5` seconds after it leaves those states, so both ends of the ramp are
@@ -172,11 +153,6 @@ retention code and no way to lose a curve by misconfiguration.
 
 Append-only, one row per closed bout, roughly 1000 rows per year.
 
-```json
-{"e":7,"start":1756137600.1,"end":1756138283.4,"observed":true,
- "dur_s":683,"dist_km":0.47,"steps":903,"v_avg":2.48,"v_max":3.0,"n":683}
-```
-
 An unobserved bout carries `"observed":false`, exact totals from the residual, and
 `start`/`end` bounding the **uncertainty window** rather than claiming a precise
 time. It has no `v_avg`, `v_max` or `n`, because no samples exist for it.
@@ -188,77 +164,64 @@ row is drawable.
 
 ### 2.4 `state.json`
 
-Rewritten atomically (`tmp` + `os.replace`).
-
-```json
-{"epoch":7,
- "last_pad":   {"elapsed_s":1008,"dist_km":0.69,"steps":1314},
- "attributed": {"elapsed_s":900, "dist_km":0.61,"steps":1180},
- "open_bout":null,
- "last_seen_wall":1756138283.4}
-```
-
-`last_pad − attributed` is the residual, persisted across bridge restarts. This is
-the file D-5 deferred; ADR D-6 (§9) records why it now exists.
+Rewritten atomically (`tmp` + `os.replace`). Holds the epoch, `last_pad`,
+`attributed`, the open bout and `last_seen_wall`; `last_pad − attributed` is the
+residual, persisted across bridge restarts. This is the file D-5 deferred; ADR D-6
+records why it now exists.
 
 `last_pad`, `attributed` and `last_seen_wall` advance on **every decoded frame**,
 including idle ones — the store sees every frame the bridge does, and only §2.2
 decides which of them also produce a sample row.
 
 Written on bout open, bout close and epoch change, and otherwise at most once every
-10 s while frames are arriving, plus once on clean shutdown. A crash between writes costs up to
-10 s of `attributed`, which surfaces as a spurious ≤10 s residual — and §2.2 makes
-even that repairable from the samples.
+10 s while frames are arriving, plus once on clean shutdown. A crash between writes
+costs up to 10 s of `attributed`, which surfaces as a spurious ≤10 s residual — and
+§2.2 makes even that repairable from the samples.
 
 ### 2.5 `links.jsonl` — diagnostic, added 2026-08-28
 
-One row per BLE connection that has **ended**. Roughly 90 bytes.
-
-```json
-{"t":1756404123.4,"conn_s":44.1,"answered_s":29.04,"frames":29,"why":"silence"}
-```
-
-| key | meaning |
-|---|---|
-| `t` | wall clock the connection ended, epoch seconds |
-| `conn_s` | how long the connection existed at all |
-| `answered_s` | how long the pad replied on it; `0.0` means it never did |
-| `frames` | status frames decoded on this connection |
-| `why` | `silence` (the D-4 watchdog), `dropped` (BlueZ let go), `poll_failed`, `command_failed`, `shutdown` |
+One row per BLE connection that has **ended**, roughly 90 bytes: when it ended,
+`conn_s` (how long the connection existed), `answered_s` (how long the pad replied
+on it), `frames` (status frames decoded), and `why` — one of `silence` (the D-4
+watchdog), `dropped` (BlueZ let go), `poll_failed`, `command_failed`, `shutdown`.
 
 **Why it exists.** Design spec open question 9. The pad answers for around 29 s
 after a connection and then goes quiet while its radio keeps acknowledging every
-packet, yet one session on 2026-08-26 answered for 1988 s on the same pad,
-firmware and code. `answered_s` was added to the bridge's `link/lost` event to
-make that visible, but it only ever reached stdout — and
-`WalkingpadService.qml`'s `handleLink` reads `state` and `msg` and drops the
-rest. So the one mode that could accumulate hundreds of connections, ordinary
-daily use, was recording nothing at all. This file is where that accumulates.
+packet, yet one session on 2026-08-26 answered for 1988 s on the same pad, firmware
+and code. `answered_s` was added to the bridge's `link/lost` event to make that
+visible, but it only ever reached stdout — and `WalkingpadService.qml`'s `handleLink`
+reads `state` and `msg` and drops the rest. So the one mode that could accumulate
+hundreds of connections, ordinary daily use, was recording nothing at all.
 
-**Why `frames` as well as `answered_s`.** A window alone cannot separate
-"replied steadily for 29 s" from "replied twice, 29 s apart". The count against
-`conn_s` is what shows the cadence, and the ~29 s claim is a claim about the
-first shape.
+**Why `frames` as well as `answered_s`.** A window alone cannot separate "replied
+steadily for 29 s" from "replied twice, 29 s apart". The count against `conn_s` is
+what shows the cadence, and the ~29 s claim is a claim about the first shape.
 
 **Why one row per ENDED connection, never per link transition.** Fact 3 makes a
 sleeping pad the normal resting state, and the bridge re-emits `absent` on every
 rescan for as long as that lasts. A row per transition would grow without bound
 while precisely nothing was happening. A connection that was never established
-writes nothing, so an absent pad costs no bytes at all. The worst case is an
-awake pad muting on its ~48 s cycle: about 1 800 rows and 160 KB in a full day,
-the same order as a day of §2.2 samples.
+writes nothing, so an absent pad costs no bytes at all. The worst case is an awake
+pad muting on its ~48 s cycle: about 1 800 rows and 160 KB in a full day, the same
+order as a day of §2.2 samples.
 
-⚠ **Nothing may read this back into attribution.** §2.2 keeps history
-rebuildable from samples alone, and every store written before this file existed
-must keep reading identically. `LINK_GAP_S` therefore stays inferred from the
-wall-clock gap between samples and is *not* replaced by these rows. This is
-evidence for one open question, not an input to the attribution model;
+⚠ **`answered_s: 0.0` is not the pad muting instantly.** Measured 2026-08-28: one
+such row (`conn_s: 17.04`, `why: silence`) appeared immediately after
+`omarchy restart shell` killed the bridge. That is fact 9's stranded link — the new
+bridge adopted a link BlueZ still reported as connected, received nothing, and the
+15 s watchdog tore it down. Rows like this say something about the *host*, not about
+the pad's firmware, and must be excluded before reasoning about question 9.
+
+⚠ **Nothing may read this back into attribution.** §2.2 keeps history rebuildable
+from samples alone, and every store written before this file existed must keep
+reading identically. `LINK_GAP_S` therefore stays inferred from the wall-clock gap
+between samples and is *not* replaced by these rows. This is evidence for one open
+question, not an input to the attribution model;
 `tests/test_store.py::test_the_link_log_never_feeds_attribution` runs the same
 frames with and without link rows and pins the two byte-identical.
 
-Read it with `bin/walkingpad-stats links`, which reports the spread of
-`answered_s` and the longest windows verbatim. It has no UI and is not meant to
-get one: when question 9 closes, this file and that subcommand go with it.
+Read it with `bin/walkingpad-stats links`. It has no UI and is not meant to get one:
+when question 9 closes, this file and that subcommand go with it.
 
 ---
 
@@ -266,8 +229,8 @@ get one: when question 9 closes, this file and that subcommand go with it.
 
 | Component | Job | Never does |
 |---|---|---|
-| `walkingpad/store.py` (new), called from `bridge.py` | Writes samples, bouts and state | Reads, aggregates, or blocks |
-| `bin/walkingpad-stats` (new) | Answers queries with JSON on stdout | Touches the pad or BlueZ |
+| `walkingpad/store.py`, called from `bridge.py` | Writes samples, bouts and state | Reads, aggregates, or blocks |
+| `bin/walkingpad-stats` | Answers queries with JSON on stdout | Touches the pad or BlueZ |
 | `WalkingpadService.qml` ring buffer | Feeds the live popup chart | Any file I/O |
 
 ### 3.1 The writer
@@ -281,9 +244,9 @@ Appends use a plain `open(..., "a")`, `write`, `flush` — no `fsync` per row, w
 1 Hz would be pointless wear for data that §2.2 can reconstruct.
 
 ⚠ **The poll loop is safety-critical** (facts 1 and 9; `Safety.stale_after_s` is
-3.0 s and `IDLE_POLL_INTERVAL_S` is already tuned against it in `bridge.py`). The
-writer must therefore never read a file, never aggregate, never scan a directory, and
-never do unbounded work. Any exception it raises is caught, emitted once as
+3.0 s and `IDLE_POLL_INTERVAL_S` is already tuned against it). The writer must
+therefore never read a file, never aggregate, never scan a directory, and never do
+unbounded work. Any exception it raises is caught, emitted once as
 `{"t":"error","code":"store_write_failed"}`, and then suppressed — a full disk must
 degrade to "no stats" and must never stop the belt controls working.
 
@@ -291,21 +254,13 @@ degrade to "no stats" and must never stop the belt controls working.
 
 `bin/walkingpad-stats`, system python, stdlib only, same shebang and
 `sys.dont_write_bytecode` guard as `bin/walkingpad-bridge`. Short-lived: the analysis
-window spawns it via `Process`, reads one JSON object from stdout, and it exits.
+window spawns it via `Process`, reads one JSON object from stdout, and it exits. All
+subcommands accept `--store PATH` and emit exactly one JSON object. Run `--help` for
+the current list.
 
-```
-walkingpad-stats sessions [--since ISO] [--until ISO] [--gap MIN]
-walkingpad-stats session  --start EPOCH [--gap MIN]      # one session + its samples
-walkingpad-stats totals   --by day|week|month|all
-walkingpad-stats residuals
-walkingpad-stats links     [--since ISO] [--until ISO] [--top N]  # §2.5, diagnostic
-```
-
-All accept `--store PATH`. All emit exactly one JSON object.
-
-Why a separate process rather than extending the bridge: aggregating a year of
+**Why a separate process rather than extending the bridge:** aggregating a year of
 samples is unbounded work, and the bridge is the process that must answer a status
-query every second to keep the safety gate open. Why not parse in QML: the same
+query every second to keep the safety gate open. **Why not parse in QML:** the same
 unbounded work would land on the UI thread, and the gap-grouping and residual maths
 belong in Python where pytest can reach them (ADR D-1). This also matches §3.2 of the
 design spec — short-lived child processes, no daemon.
@@ -314,15 +269,7 @@ design spec — short-lived child processes, no daemon.
 
 ## 4. `WalkingpadChartStack.qml`
 
-⚠ **SUPERSEDED** by charts §3.5, which deletes this component. It was 857 lines
-doing four row types, background bands and cursor handling at once. Replaced by
-`WalkingpadBarChart.qml` and `WalkingpadTimeChart.qml`.
-
-The one rule from here that survived, and is now charts §3.5: the component owns
-**no colour** and imports neither palette. It takes `fg`, `accent` and `muted` as
-properties, because the panel loader injects `service` but not `bar`
-(`shell.qml:629-637`), so a component importing either palette would be unusable in
-one of its two homes.
+⚠ **SUPERSEDED** by charts §3.5, which deletes this component and splits it in two.
 
 ---
 
@@ -335,37 +282,21 @@ What still holds: the sample ring buffer in `WalkingpadService.qml`, appended in
 `handleStatus` and capped at 3600 entries, with **no file access**. The popup reads
 that buffer and nothing else.
 
-⚠ Corrected 2026-08-26: the popup no longer slices the buffer by `gap_minutes`.
-Charts §1 replaced "the current session" with 60 fixed wall-clock minutes, so
-`computeSessionSamples` and `sessionSamples` were removed rather than left
-recomputing at 1 Hz for a property nothing read.
-
 ---
+
 ## 6. The analysis window
+
+⚠ **§6.3 SUPERSEDED** by charts §2, which restructures the window into a left rail
+and a right pane where exactly one thing is selected at a time.
 
 ### 6.1 Mechanism
 
-A new overlay-kind entry point, `WalkingpadWindow.qml`. Precedent, verified in the
-installed shell and in an installed third-party plugin:
-
-- `hypr-whichkey` declares `kinds: ["overlay"]` with `entryPoints.overlay`, and its
-  overview mode is a full-screen `PanelWindow` on `WlrLayer.Overlay` with
-  `keyboardFocus: WlrKeyboardFocus.Exclusive`, a scrim, and content
-  `anchors.centerIn: parent`.
-- The panel loader mounts it and injects `omarchyPath`, `shell`, `manifest`,
-  `barWidgetRegistry`, `pluginRegistry` and `service` (`shell.qml:623-651`). The root
-  is a plain `Item` exposing `opened`, `open(payloadJson)` and `close()`.
-
-Manifest changes:
-
-```json
-"kinds": ["service", "bar-widget", "overlay"],
-"entryPoints": {
-  "service":   "WalkingpadService.qml",
-  "barWidget": "WalkingpadPanel.qml",
-  "overlay":   "WalkingpadWindow.qml"
-}
-```
+A new overlay-kind entry point, `WalkingpadWindow.qml`, declared alongside `service`
+and `bar-widget` in the manifest. Precedent, verified in the installed shell and in
+an installed third-party plugin: `hypr-whichkey` declares `kinds: ["overlay"]` with
+`entryPoints.overlay`, and the panel loader mounts it and injects `omarchyPath`,
+`shell`, `manifest`, `barWidgetRegistry`, `pluginRegistry` and `service`
+(`shell.qml:623-651`).
 
 ### 6.2 Two consequences of adding the kind — both verified, neither cosmetic
 
@@ -376,26 +307,18 @@ kinds are owned by the panel loader" (`shell.qml:426-438`). `omarchy.menu` is th
 first-party precedent for the combination, so it is supported.
 
 This does **not** affect the documented keybinding path: the popup's IPC is
-`IpcHandler { target: "walkingpad" }` (`WalkingpadPanel.qml:189`), a Quickshell IPC
-target independent of the shell's plugin routing. `qs ipc call walkingpad toggle`
-keeps working. Only `omarchy-shell shell toggle io.github.shllg.walkingpad` changes
-meaning, and nothing documented uses it. **Verify both paths by hand before merging.**
+`IpcHandler { target: "walkingpad" }`, a Quickshell IPC target independent of the
+shell's plugin routing, so `qs ipc call walkingpad toggle` keeps working. Only
+`omarchy-shell shell toggle io.github.shllg.walkingpad` changes meaning, and nothing
+documented uses it.
 
-⚠ **`keepLoaded: true` stops being inert.** D-5 recorded that `_syncServices()` never
-reads it, which was correct — with only `service` and `bar-widget` kinds it did
+⚠ **`keepLoaded: true` stops being inert.** D-5 recorded that `_syncServices()`
+never reads it, which was correct — with only `service` and `bar-widget` kinds it did
 nothing. The panel loader *does* read it (`shell.qml:625`), so adding the overlay
 kind makes the window mount permanently rather than on first open. Keep it: the
 window holds no BLE resource, mounting is cheap QML, `summon` then delivers the
 payload immediately via `deliverIfLoaded`, and the alternative is an async Loader race
 on every open. D-6 records the correction.
-
-### 6.3 Content (v1)
-
-⚠ **SUPERSEDED** by charts §2, which restructures the window into a left rail and a
-right pane where exactly one thing is selected at a time.
-
-Still out of scope, and unchanged: calendar heatmap, goals or targets, export, and
-any comparison across sessions.
 
 ---
 ## 7. Configuration
