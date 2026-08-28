@@ -143,11 +143,16 @@ stdin ← one JSON object per line:
 `{"cmd":"stop"}` · `{"cmd":"goal","kmh":3.0}` ·
 `{"cmd":"goal","kmh":3.0,"absolute":true}`
 
-`goal` takes an OPTIONAL `absolute`. Without it the value is bounded against the
-actual belt speed by `max_goal_lead` — the stepping path, driven by −step/+step.
-With it the value is bounded by the pad's range alone, which is what the Set
+`goal` takes an OPTIONAL `absolute`. Both paths bound the value by the pad's own
+range and nothing tighter, so the flag currently distinguishes nothing; it
+survives only because collapsing the two is a separate change. Without it the
+value takes the stepping path, driven by −step/+step; with it, the path the Set
 editor commits. Both converge identically, one clamped step per status frame;
 see §6 rule 12.
+
+⚠ Until 2026-08-28 the stepping path was ALSO bounded against the actual belt
+speed by `max_goal_lead`. That bound was removed — §6 rule 12 records why and
+what it gave up.
 
 `start` takes an OPTIONAL `kmh`. With it, the bridge runs the two-part start of
 §6 rule 6 — issue `start`, then send that speed once a status frame reports the
@@ -324,10 +329,18 @@ Because of §2.1(b), rapid clicks must not become rapid writes.
 - A 250 ms debounce timer sends **one** speed command for the settled value.
 - While `ramping`, the panel labels the target "Heading for" so the input is
   visibly acknowledged even though the pad has not reached it.
-- Each step is measured from the **actual** belt speed, not from the accumulated
-  local value. The pad clamps every command to one step from where the belt
-  really is, so accumulating clicks locally would display a target the belt was
-  never going to reach.
+- Each step is measured from the **goal already pending**, falling back to the
+  goal the bridge has confirmed, and only then to the actual belt speed. The
+  button is labelled "+0.5", so three presses must be worth +1.5.
+
+⚠ This REVERSES the rule that stood here until 2026-08-28, which said to measure
+each step from the actual speed and never from the accumulated local value. Its
+reasoning was that an accumulated target is one the belt would never reach —
+true only because `clamp_goal` was cutting the goal back to the belt. Measured on
+hardware 2026-08-28: three presses of "+0.5" from 2.0 km/h delivered +0.8,
+because each press re-based on a speed that was still ramping. With the lead
+bound gone the accumulated target is reachable, and `clamp_speed()` still walks
+the belt there one step per status frame.
 
 ⚠ The bridge's repeat-suppression signature includes the requested speed, not
 just the command name. It keyed on the name alone until 2026-08-25, which made
@@ -614,34 +627,44 @@ The pad accepts unauthenticated commands and may have a person standing on it.
     this design** -- every other write here follows a press. §5.8 requires that
     to be justified rather than assumed, so:
 
-    1. `Safety.clamp_goal()` bounds the goal to `max_goal_lead` (1.0 km/h) either
-       side of the ACTUAL speed. This is what replaces "one gesture, one step".
-       The original rationale was *"the worst case of a stuck key or a double
-       click is one small increment"*; an uncapped goal hands that back, because
-       a repeating key walks the goal to the ceiling and the belt follows it
-       there. With the cap, a key that repeats forever still cannot move the goal
-       more than 1.0 km/h ahead of reality, and cannot compound until the belt
-       has caught up -- which takes real seconds, in front of someone who can see
-       it happening.
-    2. Every write is still `clamp_speed()`, one `max_step` step. Loosening the
-       lead does not loosen this; `tests/test_goal.py` asserts it by widening
-       `max_goal_lead` and checking the write is still one step.
-    3. Nothing is written unless a fresh frame says `belt == running`, the mode
+    1. Every write is `clamp_speed()`, one `max_step` step from the ACTUAL
+       speed. This is the bound that matters with someone standing on the belt:
+       the intention may sit anywhere, but the belt is never asked to jump.
+       `tests/test_goal.py` asserts it against a goal at the pad's ceiling.
+    2. Nothing is written unless a fresh frame says `belt == running`, the mode
        is not standby, and `may_move()` passes.
-    4. It stops on arrival and never repeats a value. A belt that is not moving
+    3. It stops on arrival and never repeats a value. A belt that is not moving
        toward the goal -- someone braced against it, a pad ignoring us -- ends
        the convergence rather than being hammered once a second.
+       ⚠ "Arrival" means within 0.1 km/h, the pad's own reporting resolution. It
+       was half a `max_step` (0.25) until 2026-08-28, which declared a 3.0 goal
+       reached with the belt at 2.8 and swallowed a press the user had made.
 
-    ⚠ Bound 1 governs the STEPPING path only. `{"cmd":"goal","kmh":X,"absolute":
-    true}` -- a value the user typed into the Set editor and committed -- is
-    bounded by the pad's own range and nothing tighter
-    (`Safety.clamp_goal_absolute`). The lead bound is aimed at the repeating
-    path, where each press is worth one increment and nobody has named a
-    destination; an absolute value is one deliberate act that does name one, and
-    cutting it to where the belt currently sits only makes the user type it
-    again. Revised on 2026-08-25 after the bound turned a typed 3.5 into 1.0 on
-    a STOPPED belt -- a state where the goal is not serviced at all, so the
-    bound was protecting nothing and refusing everything.
+    ⚠ **There was a fourth bound, and it was listed first. It is gone.**
+    `Safety.clamp_goal()` held the goal within `max_goal_lead` (1.0 km/h) either
+    side of the ACTUAL speed, so a repeating key could not walk it to the
+    ceiling. REMOVED by decision on 2026-08-28.
+
+    It was removed because it broke a promise the UI makes out loud. The button
+    is labelled "+0.5". Measured on hardware that day, three presses from
+    2.0 km/h produced a goal of 3.0 and a belt that settled at 2.8 -- the cap ate
+    the third press and bound 3's old tolerance ate the remainder. A control that
+    does not do what its own label says is its own kind of hazard, and the
+    decision was that the label's promise outranks the bound.
+
+    What that gives up, stated plainly so nobody reinstates the cap as a bug fix:
+    a key that repeats now walks the goal to `max_speed`, and the servo follows
+    it there one step per status frame with nobody pressing anything. Bounds 1-3
+    are the whole safety argument now.
+    `tests/test_goal.py::test_a_repeating_key_can_now_walk_the_goal_to_the_ceiling`
+    pins that behaviour deliberately rather than leaving it to be rediscovered.
+
+    The `absolute` flag survives but no longer distinguishes anything, since both
+    paths are bounded by the pad's range alone; collapsing them is a flagged
+    follow-up. The 2026-08-25 revision that introduced the flag -- after the lead
+    bound turned a typed 3.5 into 1.0 on a STOPPED belt, where the goal is not
+    serviced at all -- is superseded rather than retracted. It was right about
+    the same bound, and reached the same verdict on a smaller case.
 
     Bounds 2, 3 and 4 are what make that safe, and they apply identically to
     both paths: `max_speed` is still the ceiling, `min_goal` still the floor, and
@@ -853,6 +876,36 @@ submission (`docs/plugin-evidence.md`).
    `bin/walkingpad-stats links` reports the spread and the longest windows
    verbatim. Ordinary use now accumulates the evidence; nothing about the
    bridge's behaviour changed, and no timing was designed against.
+
+   **Narrowed hard on 2026-08-28 by the first day of `links.jsonl`.** 60+
+   connections in one afternoon settled two of the three competing shapes:
+
+   - **It is a TIMER, not a count of replies.** `answered_s` holds at
+     28.09–29.14 s across frame counts of 15, 20, 24, 25, 30, 31, 33, 34 and 36.
+     The count tracks the poll rate (15 at the 2.0 s idle interval, ~30 at the
+     1.0 s running interval); the window does not move. A "the pad answers N
+     queries then stops" hypothesis fitted the first 39 rows perfectly and is
+     now dead — they were all at one poll rate.
+   - **The poll rate does not affect the window**, so lowering
+     `IDLE_POLL_INTERVAL_S` to 1.0 would not have helped. That experiment was
+     designed and then answered without running it, from rows that already
+     existed at both rates.
+   - ⚠ **Belt motion is NOT the variable, and an earlier reading of this same
+     data that said it was is RETRACTED.** The retracted inference was that a
+     42-minute connection covering a walk proved motion suppressed the mute. It
+     does not: that connection began at 14:27:03 and stopped muting **eight
+     minutes before the belt first moved** at 14:35:22. And after a shell
+     restart the pad muted at 15:15:29, 15:16:18, 15:17:07, 15:17:56 and
+     15:18:45 while the belt ran continuously. Motion neither causes nor
+     prevents it.
+
+   What is left is the shape the question started with, now with two instances
+   instead of one: the pad mutes at ~29 s as its normal behaviour, and
+   OCCASIONALLY a connection answers indefinitely. Both known cases — 1988 s on
+   2026-08-26 and 2561 s on 2026-08-28 (14:27:03 to 15:09:44) — ended only
+   because something else killed them, the second by a deliberate shell restart.
+   Neither began at anything the bridge did. Nothing yet distinguishes the two
+   populations, and one coincidence is not a cause.
 
    ⚠ An earlier version of this paragraph eliminated BlueZ because `bluetoothd`
    had been one continuous process across both sessions. That is backwards --

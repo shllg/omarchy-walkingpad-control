@@ -168,6 +168,17 @@ fixture is what the bridge actually writes rather than hand-rolled rows.
 instantiate and nothing inside it runs. Data and bindings need a real display. `pytest` is a dev-only dependency (`python-pytest`); the
 bridge itself does not need it.
 
+⚠ **A QML edit does NOT reach the running bar until the shell is restarted.**
+`omarchy-launch-shell` starts Quickshell with `QS_DISABLE_FILE_WATCHER=1`, and
+its own comment says so: *"Quickshell's own reloading is off; Omarchy restarts
+the shell deliberately."* So even with the plugin directory symlinked to a
+checkout, the bar keeps running whatever QML it loaded at startup. Run
+`omarchy restart shell`. The **bridge** is different — it is a child process, so
+killing it is enough to pick up a Python change, and the service respawns it in
+seconds. Measured 2026-08-28, after a QML fix was tested against a shell that had
+been running since two days before it was written and the result was read as a
+failure of the fix.
+
 Only `docs/smoke-test.md` moves a belt, and it requires the operator to be standing
 clear. It is also the live tracker for every open hardware question.
 

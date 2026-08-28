@@ -303,11 +303,56 @@ of these against the bar icon and popup:
   a fresh connection landed. Do not build a "press stop first" workaround on this;
   the cause is open question 9.
 
+- **2026-08-28 — checks 1, 2, 3 and half of 5 PASSED. Check 4 needs rewriting.**
+
+  1. **PASS.** Icon alone, no text, walk glyph.
+     ⚠ **But it dims while the pad is wide awake.** `Model.barDimmed()` is
+     `linkState !== "connected"`, and question 9's ~29 s mute makes the link
+     flap on a ~48 s cycle, so the icon dims and returns roughly every 48 s with
+     the pad a metre away and fully reachable. The rendering is correct; this
+     check's wording ("dimmed while the pad is asleep") assumed a mute that does
+     not exist. Rewrite the check, not the code.
+  2. **PASS.** With the pad genuinely in standby, the popup showed the stats AND
+     the standby line together, which is the designed behaviour
+     (`WalkingpadPanel.qml:479-483`). `Model.instruction()` gates that string on
+     `mode === "standby"` alone, so its presence proves the mode rather than a
+     stuck line. The original defect is not present.
+  3. **PASS**, and it exposed a gap this check does not currently cover.
+     Right-click on a stopped belt was refused and the belt did not start.
+     ⚠ **With the popup CLOSED, a refused right-click is completely invisible.**
+     The handler fires (`WalkingpadPanel.qml:347`, and `WidgetButton.qml:97`
+     accepts the right button), the stop is sent, and the bridge refuses it —
+     but `root.instruction` renders inside the popup, and the tooltip carries
+     `linkState`/`beltState`/`speed`, never the error. The operator reported
+     "right click does not do anything", which was an accurate description of
+     what a user sees.
+
+     This is worse than cosmetic in one specific case: someone walking who
+     right-clicks to stop, and whose stop is refused as `stale_link` — about one
+     press in three right now. The belt keeps moving and nothing says the stop
+     failed. Fact 18 exempts stop from throttling precisely so a second press is
+     the recovery, and that only works if the user knows the first one failed.
+     ⚠ It stopped being hypothetical the same day: during §4d the operator
+     pressed Stop **while standing on a moving belt**, saw no reaction, and
+     stepped off. **This check must gain a "where does the user see it" step.**
+  4. **NOT RUN — the expected result is stale.** It asks for one speed change of
+     one step from four fast presses, which describes the one-shot `setSpeed`
+     path. The buttons drive `setGoal()` (§4d) and have since the goal servo
+     landed; `setSpeed`'s own comment says "the buttons use setGoal()". Rewrite
+     against what the goal does before running it.
+  5. **Half PASS.** One kill, widget recovered in seconds. The four-kills-in-a-
+     minute half is still unrun.
+
 ## 4d. The live goal — stand clear of the belt
 
 ⚠ The goal is the first thing in this bridge that writes a motion command with
-nobody pressing anything. Design spec §6 rule 12 lists the four bounds it rests
+nobody pressing anything. Design spec §6 rule 12 lists the three bounds it rests
 on; this section is where they stop being an argument.
+
+⚠⚠ **Step 2 was REPLACED on 2026-08-28.** The lead bound it used to verify was
+removed that day, so the old step now tests for behaviour that is gone. The
+2026-08-27 run below is kept as the historical record and is NOT re-runnable as
+written — see design spec §6 rule 12.
 
 **Preconditions** as §4b: awake, `mode == manual`, phone app closed, belt clear.
 Belt running at a known speed, started per §4b.
@@ -316,9 +361,18 @@ Belt running at a known speed, started per §4b.
 
 1. **It converges.** With the belt steady at 2.0, press `+0.5` once. Expect the
    panel to show `Goal 2.5` immediately and the belt to reach 2.5 within ~2 s.
-2. **The cap holds.** Press `+0.5` five times as fast as you can. The goal must
-   stop at **actual + 1.0**, not at 4.5. Record the number the panel settles on.
-   This is bound 1 and it is the one replacing "one gesture, one step".
+2. **The label's promise holds.** With the belt steady at a known speed, press
+   `+0.5` three times as fast as you can. The goal must land on exactly
+   **start + 1.5** — the button says +0.5, so three presses are worth +1.5 and
+   nothing may quietly cut them. Record the number the panel settles on and the
+   speed the belt reaches.
+
+   ⚠ Replaces the lead-bound check of 2026-08-27, which required the goal to
+   stop at actual + 1.0. That bound was removed on 2026-08-28 after three
+   presses from 2.0 km/h delivered +0.8 on this pad. What still bounds the belt
+   is bound 1: no single write may exceed one `max_step` from the ACTUAL speed,
+   so watch the `target` values as it climbs and record any step above 0.5.
+   A step above 0.5 is a stop-the-test failure.
 3. **It reverses.** While the belt is still climbing, press `-0.5` twice. The
    goal must move down from where it was — one intention, not a queue. Record
    whether the belt turns around without first finishing the old climb.
@@ -345,7 +399,9 @@ start: a goal must never write in the same status frame a start's speed lands.
   1. **It converges.** Belt steady at 2.0, goal 2.5 set at 16:29:44.863. One write
      at 16:29:45.921, belt 2.0 → 2.3 → 2.5 by 16:29:47.877 — **2.0 s**, as
      specified.
-  2. **The cap holds.** Five goals sent back to back (3.0, 3.5, 4.0, 4.5, 5.0)
+  2. **The cap holds.** ⚠ SUPERSEDED 2026-08-28 — the bound this verified was
+     removed; the result below is history, not a requirement.
+     Five goals sent back to back (3.0, 3.5, 4.0, 4.5, 5.0)
      with the belt actually at 2.5. The goal settled at **3.5 — actual + 1.0**,
      not 5.0. Bound 1 holds. The servo then walked the belt one clamped step per
      status frame: `target` 3.0 → 3.2 → 3.5, no step above 0.5.
@@ -368,6 +424,59 @@ start: a goal must never write in the same status frame a start's speed lands.
   Also observed, confirming fact 15: `pad_set_speed` stayed at 4.2 while the belt
   was stopped, because byte [14] is the last BLE-commanded speed and never a
   target.
+
+- **2026-08-28 15:14–15:26 — ✅ ALL SIX STEPS PASSED, on the rewritten step 2.**
+  First run against the goal with `max_goal_lead` removed.
+
+  ⚠⚠ **Procedure deviation, recorded because the sign-off is worthless if it is
+  not truthful: the operator was ON THE BELT for these runs.** Every §4d step
+  says to stand clear. The step counter advancing through the run is the
+  evidence (632 steps by 15:23). The results below stand — arguably it is the
+  harder test — but nobody should read this record as a clear-belt run, and the
+  next one should be one.
+
+  1. **It converges.** Belt at 2.0, goal 2.5 at 15:19:50, belt at 2.5 by
+     15:19:52.
+  2. **The label's promise holds.** Three `+0.5` presses from a settled 2.0
+     produced `g=3.5` exactly, and the belt reached 3.5:
+     `2.0→c2.5 · 2.2→c2.7 · 2.3→c2.8 · 2.8→c3.3 · 3.0→c3.5`, arriving 15:15:07
+     with `g` cleared. **Every write exactly 0.5 above the actual speed** — five
+     writes, no step over one clamp. Under the old lead bound the same three
+     presses gave 3.0 and a belt that stopped at 2.8.
+  3. **It reverses.** Four `-0.5` presses took the goal 3.5 → **1.5** (−2.0,
+     exact). One `+0.5` while the belt was still descending moved it 1.5 → **2.0**
+     — one intention moved, not a queue — and the belt settled there at 15:15:34.
+  4. **It stops on arrival.** `g` went `null` on the arrival frame every time,
+     with no further speed frame written.
+  5. **Stop cancels it.** ⚠ The critical one. Goal 5.0 with the belt converging
+     through 2.5 → 2.8 (`c` 3.0 then 3.3); stop at 15:23:53.490 cleared `g` to
+     `null` and `c` to 0.0 **on the same frame**. The belt wound down 3.1 → 0.6 →
+     0.0 and stayed stopped. The goal did not survive the stop.
+  6. **A refused stop is not red.** Refused on a stopped belt with "no recent
+     evidence the belt is moving", rendered in the **accent** colour, and gone
+     after closing and reopening the panel. Step 6 was open since 2026-08-27;
+     it is now closed.
+
+  The closing §4b re-run passed at 15:25:43: `starting` with `c=2.0`, `running`
+  at v=0.0, settled at exactly 2.0, `g=None` on every frame. No goal write
+  collided with the frame the start's speed landed on.
+
+  ⚠ **A defect was found and fixed during this run, and the fix is UNVERIFIED on
+  hardware.** With the lead bound gone, every press during one of question 9's
+  mutes added another step to the panel's optimistic local goal while the bridge
+  refused each send on the stale link. At 15:23:45 the popup read
+  `Goal 5.0 km/h` and *"the pad has gone quiet, so nothing was sent"* at the same
+  time, with `g=None` on every frame — a goal that existed nowhere but in the
+  widget. The whole accumulated intention then landed at once when the link
+  returned. `WalkingpadService.qml` now clears the pending goal on `stale_link`
+  and `standby`, the two codes the bridge refuses on before adopting anything.
+  **Re-run steps 2 and 3 across a mute to confirm.**
+
+  Also observed, and NOT explained: at 15:26:18 the belt was stopped while
+  `commanded_speed` still read 2.0, so this bridge never sent a stop — a sent
+  stop drives it to 0.0, as it did at 15:23:53. The operator had pressed Stop
+  with no effect and then stepped off the pad. An unloaded auto-stop is the
+  obvious candidate and it is UNMEASURED; see `docs/protocol-evidence.md`.
 
 ## 4e. Counters across a stop — stand clear of the belt
 

@@ -531,3 +531,25 @@ describes neither.
 
 ⚠ Nothing about the bridge's timing changed, and none of this is read back into
 attribution. Recording the window is not the same as designing against it.
+
+
+## Two observations from 2026-08-28, neither of them measured
+
+Recorded so they are not lost, and marked so neither is cited as fact.
+
+**The step counter is vibration-based.** Reported by the operator while walking:
+bouncing within a single step advances the counter faster than the step rate.
+So `steps` counts something closer to impacts than to gait. It stays the right
+field for the charts — it is an integer with real resolution, and distance is
+quantised to 10 m (charts §1) — but "steps" is the pad's word for it, not a
+verified stride count, and cadence derived from it inherits the same caveat.
+
+**The pad may stop itself when nobody is on it.** At 15:26:18 the belt read
+`stopped` while the bridge's `commanded_speed` still read 2.0. This bridge
+therefore never sent a stop: a stop it sends drives `commanded_speed` to 0.0, as
+it did at 15:23:53 in the same session. The operator had pressed Stop with no
+effect, then stepped off the belt. An unloaded auto-stop is the obvious
+candidate and it is UNTESTED — a mute was in progress across the transition, so
+"the pad stopped on its own" and "a stop landed unseen" are not separated by
+this evidence. Do not rely on it as a safety mechanism; `Safety.may_stop` and
+the panel remain the stop path.
