@@ -120,10 +120,49 @@ function targetText(target) {
   return Number(target).toFixed(1) + " km/h"
 }
 
-function tooltip(linkState, beltState, hasStatus, ramping, speed) {
+// The bar's own words for a refusal, deliberately NOT the bridge's.
+//
+// ⚠ The tooltip is a plain Text with no width and no wrapMode
+// (Ui/PanelToolTip.qml:38), so it never wraps: the 140-character `stale_link`
+// message would draw one tooltip across the whole screen. The popup is where
+// the full sentence belongs. This is the glance form -- what happened, and
+// whether the belt is still your problem -- and the popup carries the rest.
+//
+// An unknown code still says something. Codes arrive from the bridge, and a
+// refusal nobody has a phrase for is still a refusal the user must see.
+function refusalSummary(errorCode) {
+  if (errorCode === "stop_unsafe") return "Stop refused — use the panel or remote"
+  if (errorCode === "stale_link") return "Pad quiet — nothing was sent"
+  if (errorCode === "repeat_suppressed") return "Repeat ignored — press again in a second"
+  if (errorCode === "start_unconfirmed") return "The belt did not start"
+  if (errorCode === "link_unhealthy") return "The pad is sending frames we cannot read"
+  if (errorCode === "no_link") return "Not connected to the pad"
+  if (errorCode === "no_bridge") return "The bridge is not running"
+  if (errorCode === "bad_command") return "The bridge rejected that command"
+  // Standby is an ambient state, not a press that failed: instruction() names
+  // the M button for it, and the bar has nothing to add. Listed rather than
+  // left to the caller so this function agrees with instruction() on its own.
+  if (errorCode === "standby" || errorCode === "") return ""
+  return "Command refused"
+}
+
+// `errorCode` is the LIVE refusal only -- the caller decides how long that
+// lasts, and passes "" once it has expired. Fact 18 exempts stop from
+// throttling precisely so a second press is the user's recovery, and that
+// recovery only works if the first press visibly failed. With the popup closed
+// the icon and this string are the whole of what a user can see.
+//
+// The state line stays first and keeps its shape. Pairing it with the refusal
+// is the point: "Running · 2.5 km/h" above "Stop refused" says the belt is
+// still moving AND that the plugin knows it did not stop it, which is exactly
+// the case smoke-test §4c check 3 found invisible.
+function tooltip(linkState, beltState, hasStatus, ramping, speed, errorCode) {
   var label = stateLabel(linkState, beltState, hasStatus, ramping)
-  if (linkState !== "connected" || !hasStatus) return "WalkingPad · " + label
-  return "WalkingPad · " + label + " · " + speedText(speed) + " km/h"
+  var head = (linkState !== "connected" || !hasStatus)
+    ? "WalkingPad · " + label
+    : "WalkingPad · " + label + " · " + speedText(speed) + " km/h"
+  var refusal = refusalSummary(errorCode === undefined ? "" : errorCode)
+  return refusal === "" ? head : head + "\n" + refusal
 }
 
 // ----------------------------------------------------------------- charts

@@ -66,6 +66,41 @@ Panel {
   readonly property bool refusalIsFault: root.refusing
     && !Model.isAdvisory(service.lastErrorCode)
 
+  // A refusal is LIVE for a few seconds after the press that provoked it, and
+  // history afterwards. Everything the closed bar shows is gated on this.
+  //
+  // ⚠ Why this is longer than the service's own 4 s dwell, rather than reusing
+  // it. They have opposite jobs. `errorDwell` protects a message the user is
+  // ALREADY reading from being wiped by an impatient second press. This one has
+  // to be found by someone who was not looking at the bar at all -- smoke-test
+  // §4d, where the operator pressed Stop while standing on a moving belt, saw
+  // no reaction and stepped off. Ten seconds is long enough to look down at the
+  // belt, realise it is still moving, and look back up.
+  //
+  // It stays transient rather than standing until dismissed. Fact 18 makes a
+  // second press the recovery, and each press re-arms this, so the loop the
+  // user actually performs keeps the marker alive for as long as they are still
+  // trying. A marker with no expiry would instead sit there hours later reading
+  // as a plugin stuck in a fault.
+  Timer {
+    id: refusalDwell
+    interval: 10000
+  }
+
+  Connections {
+    target: root.service
+    // The service assigns message before code precisely so the pair is coherent
+    // when the code changes, so the code is the trigger to watch. It fires on
+    // every new refusal, including one code replacing another, which
+    // onRefusingChanged would miss because the bool never leaves true.
+    function onLastErrorCodeChanged() {
+      if (root.service && root.service.lastErrorCode !== "") refusalDwell.restart()
+      else refusalDwell.stop()
+    }
+  }
+
+  readonly property bool refusalLive: root.refusing && refusalDwell.running
+
   property int cursorIndex: -1
   // The control row and chart address different collections. Keeping their
   // cursors separate prevents a hovered bucket from becoming a button index;
@@ -272,9 +307,17 @@ Panel {
 
   onServiceChanged: applySettings()
   onSettingsChanged: applySettings()
-  // Opening or closing the panel dismisses the last refusal. It described the
-  // press that provoked it, not a standing condition, and finding it still
-  // there on the next visit reads as a fault the plugin is stuck in.
+  // Closing the panel dismisses the last refusal, and so does opening it on a
+  // refusal that has already expired. It described the press that provoked it,
+  // not a standing condition, and finding it still there on the next visit
+  // reads as a fault the plugin is stuck in.
+  //
+  // ⚠ But opening the panel on a LIVE refusal must keep it. The bar marker
+  // above exists to send someone here to find out what happened; clearing on
+  // open unconditionally would wipe the explanation at the exact moment it was
+  // asked for, and the popup would open on an empty instruction line. The
+  // dwell is what separates the two cases, so both surfaces agree on what
+  // "still live" means.
   onOpenedChanged: {
     cursorIndex = -1
     chartCursorIndex = -1
@@ -285,7 +328,7 @@ Panel {
     // Assigned directly rather than via closeEditor(), which hands focus back
     // to the key catcher -- not something to do to a panel on its way out.
     root.editing = false
-    if (service) service.clearError()
+    if (service && !(root.opened && refusalDwell.running)) service.clearError()
   }
 
   // A half-typed goal outlives neither the link nor the pad's attention. The
@@ -332,12 +375,45 @@ Panel {
     text: Model.barIcon(root.linkState, root.beltState)
     tooltipText: root.service
       ? Model.tooltip(root.linkState, root.beltState, root.hasStatus,
-                      root.ramping, root.currentSpeed)
+                      root.ramping, root.currentSpeed,
+                      root.refusalLive ? root.service.lastErrorCode : "")
       : "WalkingPad service unavailable"
+
+    // ⚠ The one thing a user sees when the popup is CLOSED.
+    //
+    // Smoke-test §4c check 3, on hardware 2026-08-28: a refused right-click was
+    // "completely invisible" -- the handler fired, the bridge refused, and
+    // `root.instruction` rendered inside a popup nobody had open. The operator's
+    // report was "right click does not do anything", which described exactly
+    // what there was to see. Fact 18 exempts stop from throttling so that a
+    // second press is the recovery; a recovery nobody knows to perform is not
+    // one.
+    //
+    // `active` is the shell's own mechanism for a bar widget that wants
+    // attention -- Bar/widgets/Microphone.qml uses it for a live mic.
+    active: root.refusalLive
+
+    // ⚠ The default `activeColor` is NOT an attention role. `WidgetButton`
+    // defaults it to `bar.urgent`, and `Commons/Color.qml:76` defines
+    // `Color.bar.active` as `pick("bar.active", root.urgent)` -- a fallback to
+    // the ALARM colour for any theme that does not define `bar.active`. Neither
+    // theme on the author's machine does, so the default painted every refusal
+    // red. Confirmed on hardware 2026-08-28 (smoke-test §4c check 3): the
+    // operator reported "icon red" for a stop refused on a stopped belt.
+    //
+    // That is the same defect the popup was already corrected for on
+    // 2026-08-25, and it gets the same answer. Model.isAdvisory() draws the
+    // line: an expected refusal the user can act on gets `accent` -- attention,
+    // not failure -- and only a plugin that is genuinely not working gets
+    // `urgent`. Both surfaces now tell one story.
+    activeColor: root.refusalIsFault ? root.bar.urgent : Color.accent
 
     // Fact 3: a sleeping pad is the normal resting state, so absence is dimmed
     // rather than coloured. Nothing about it is an error to announce.
-    opacity: Model.barDimmed(root.linkState) ? 0.55 : 1.0
+    //
+    // A live refusal outranks that. An absent pad plus a refusal is a press
+    // that just failed, and dimming it says the opposite.
+    opacity: (Model.barDimmed(root.linkState) && !root.refusalLive) ? 0.55 : 1.0
     Behavior on opacity { NumberAnimation { duration: 200 } }
 
     onPressed: function(b) {
