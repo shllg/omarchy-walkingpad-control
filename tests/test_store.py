@@ -888,3 +888,117 @@ def test_unreadable_state_file_starts_fresh_without_disabling(tmp_path):
     assert emitted == []
     assert store.epoch == 0
 
+
+
+def test_a_link_row_is_appended_with_the_shape_open_question_9_needs(tmp_path):
+    # Design §2.5. answered_s alone cannot separate "replied steadily for 29 s"
+    # from "replied twice, 29 s apart", and the ~29 s mute is a claim about the
+    # first shape -- so the frame count and the connection's own length are part
+    # of the row, not decoration.
+    root = tmp_path / "store"
+    clock = FakeClock()
+    store = Store(root, now=clock)
+
+    store.record_link(conn_s=44.1, answered_s=29.04, frames=29, why="silence")
+    clock.advance(60)
+    store.record_link(conn_s=15.2, answered_s=0.0, frames=0, why="dropped")
+
+    rows = read_jsonl(root / "links.jsonl")
+    assert rows == [
+        {"t": 1_700_000_000.0, "conn_s": 44.1, "answered_s": 29.04,
+         "frames": 29, "why": "silence"},
+        {"t": 1_700_000_060.0, "conn_s": 15.2, "answered_s": 0.0,
+         "frames": 0, "why": "dropped"},
+    ]
+
+
+def test_the_link_log_never_feeds_attribution(tmp_path):
+    # ⚠ The load-bearing half of §2.5. Design §2.2 keeps history rebuildable
+    # from samples alone, and every store written before links.jsonl existed
+    # must keep reading identically -- so a link row must change no counter, no
+    # bout and no sample. Asserting that by running the SAME frames with and
+    # without one is what makes "diagnostic only" a property rather than a
+    # promise: any future code that consulted these rows would diverge here.
+    def run(with_link_rows):
+        root = tmp_path / ("linked" if with_link_rows else "plain")
+        clock = FakeClock()
+        store = Store(root, now=clock)
+        for steps in (100, 140, 180):
+            if with_link_rows:
+                store.record_link(conn_s=30.0, answered_s=29.0, frames=29,
+                                  why="silence")
+            store.record(
+                make_status("running", 2.5, steps=steps,
+                            distance_km=round(steps / 1300.0, 2),
+                            elapsed_s=100 + steps),
+                None, None)
+            clock.advance(2)
+        store.close()
+        return root, store
+
+    linked_root, linked = run(True)
+    plain_root, plain = run(False)
+
+    assert linked.attributed == plain.attributed
+    assert linked.epoch == plain.epoch
+    assert (read_jsonl(linked_root / "bouts.jsonl")
+            == read_jsonl(plain_root / "bouts.jsonl"))
+    assert (read_jsonl(next((linked_root / "samples").glob("*.jsonl")))
+            == read_jsonl(next((plain_root / "samples").glob("*.jsonl"))))
+    assert (json.loads((linked_root / "state.json").read_text(encoding="utf-8"))
+            == json.loads((plain_root / "state.json").read_text(encoding="utf-8")))
+    # And the rows really were written, so the comparison above is not vacuous.
+    assert len(read_jsonl(linked_root / "links.jsonl")) == 3
+
+
+def test_a_non_regular_link_log_degrades_the_store_once(tmp_path):
+    # Same leaf hardening as every other predictable path in here: links.jsonl
+    # is as guessable as bouts.jsonl, so it gets the same O_NOFOLLOW refusal and
+    # the same design §3.1 answer -- degrade once, never reach belt control.
+    root = tmp_path / "store"
+    root.mkdir(mode=0o700)
+    decoy = tmp_path / "decoy"
+    decoy.write_text("untouched", encoding="utf-8")
+    (root / "links.jsonl").symlink_to(decoy)
+    emitted = []
+
+    store = Store(root, emit=emitted.append, now=FakeClock())
+    store.record_link(conn_s=44.1, answered_s=29.04, frames=29, why="silence")
+
+    assert store._disabled is True
+    assert [event["code"] for event in emitted] == ["store_write_failed"]
+    assert "refusing non-regular file" in emitted[0]["msg"]
+    assert decoy.read_text(encoding="utf-8") == "untouched"
+
+
+def test_a_lost_link_reaches_links_jsonl_through_the_real_store(tmp_path):
+    # The seam between the two units: everything else covering §2.5 either calls
+    # Store.record_link directly or hands the Bridge a recording double, so a
+    # keyword renamed on one side of that seam would pass both suites. This
+    # drives the real watchdog into the real writer and then reads the file.
+    class SilentTransport:
+        connected = True
+
+        def write(self, payload):
+            pass
+
+        def disconnect(self):
+            self.connected = False
+
+    clock = FakeClock()
+    store = Store(tmp_path, now=clock)
+    bridge = Bridge(transport=SilentTransport(), store=store)
+    bridge.emit = lambda obj: None
+    bridge._connection_open = True
+    bridge._frames_this_connection = 29
+    bridge._connected_at = time.monotonic() - LINK_DEAD_AFTER_S - 29.04
+    bridge._last_status_at = time.monotonic() - LINK_DEAD_AFTER_S - 0.01
+
+    bridge._service_link()
+
+    rows = read_jsonl(tmp_path / "links.jsonl")
+    assert len(rows) == 1
+    assert rows[0]["why"] == "silence"
+    assert rows[0]["frames"] == 29
+    assert 29.0 <= rows[0]["answered_s"] <= 29.1
+    assert rows[0]["t"] == clock.wall

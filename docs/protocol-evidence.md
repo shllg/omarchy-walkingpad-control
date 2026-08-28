@@ -508,3 +508,21 @@ second client is not a clean explanation either.
 What survives: the pad answers for roughly half a minute and then goes quiet.
 What does not: any claim that the number is fixed. Do not treat 29.2 s as a
 constant to design against; read `answered_s` from the log instead.
+
+### Every connection is now recorded (2026-08-28)
+
+`answered_s` reached stdout only, and `WalkingpadService.qml` drops it — so the
+installed plugin, the one thing that runs all day, recorded none of this. The
+bridge now appends one row per **ended** connection to `links.jsonl` in the
+history store: the window, how long the connection lasted, how many frames
+arrived on it, and which path ended it. Stats plan §2.5 is the format.
+
+    bin/walkingpad-stats links --top 5
+
+reports the spread of `answered_s`, how many connections never answered at all,
+the counts by reason, and the longest windows verbatim. The average is
+deliberately not the headline: over the 29 s and 1988 s regimes together it
+describes neither.
+
+⚠ Nothing about the bridge's timing changed, and none of this is read back into
+attribution. Recording the window is not the same as designing against it.

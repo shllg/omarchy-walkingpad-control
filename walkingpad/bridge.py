@@ -75,6 +75,11 @@ class Bridge:
         self.mode = "unknown"
         self._last_status_at = 0.0
         self._connected_at = 0.0
+        # One connection's lifetime, for the link log design §2.5 keeps. A row
+        # is written when a connection that actually existed ends, so this flag
+        # is what stops a sleeping pad's endless rescans writing anything.
+        self._connection_open = False
+        self._frames_this_connection = 0
         self._stopped_since = time.monotonic()
         self._bad_frames = 0
         self._stdin_buffer = b""
@@ -265,6 +270,10 @@ class Bridge:
             return
         self._bad_frames = 0
         self._last_status_at = time.monotonic()
+        # answered_s alone cannot separate "replied steadily for 29 s" from
+        # "replied twice, 29 s apart". The count against conn_s is what shows
+        # the cadence, and open question 9 is about exactly that shape.
+        self._frames_this_connection += 1
         self.current_speed = status.speed_kmh
         self.belt = status.belt
         self.mode = status.mode
@@ -436,9 +445,14 @@ class Bridge:
         try:
             self.transport.write(payload)
         except Exception as exc:
-            self.emit({"t": "link", "state": "lost", "msg": str(exc)})
+            # §4.1 promises answered_s on every lost link, and this one is the
+            # most informative of them: it is a link that died under a command
+            # the user was waiting on.
+            self.emit({"t": "link", "state": "lost", "msg": str(exc),
+                       "answered_s": self._answered_s()})
             self.transport.disconnect()
             self._close_store_bout_after_link_loss()
+            self._end_connection("command_failed")
             return False
         return True
 
@@ -449,6 +463,29 @@ class Bridge:
         # Store method owns design §3.1's catch-once-then-disable boundary.
         if self.store is not None:
             self.store.close_open_bout()
+
+    def _end_connection(self, why: str) -> None:
+        """Record the connection that just ended, for open question 9.
+
+        Called from every path that tears the radio down, with `why` naming
+        which one, because the question is whether the ~29 s mute depends on
+        what the connection was doing. `dropped` is BlueZ letting go by itself,
+        `silence` is the D-4 watchdog, and the two write failures separate a
+        poll from a command the user was waiting on.
+
+        Deliberately a no-op unless a connection was actually established: fact
+        3 makes an absent pad ordinary, and its rescans must write nothing.
+        """
+        if not self._connection_open:
+            return
+        self._connection_open = False
+        if self.store is not None:
+            self.store.record_link(
+                conn_s=round(time.monotonic() - self._connected_at, 2),
+                answered_s=self._answered_s(),
+                frames=self._frames_this_connection,
+                why=why,
+            )
 
     # -- link --------------------------------------------------------------
     def _answered_s(self) -> float:
@@ -483,6 +520,9 @@ class Bridge:
             # tear down, and the mute makes these drops frequent.
             self.transport.disconnect()
             self.emit({"t": "link", "state": "scanning"})
+            # Before find(), which blocks for seconds: a row already written
+            # survives a crash inside the scan.
+            self._end_connection("dropped")
             try:
                 device = self.transport.find(should_continue=self._keep_running)
             except Exception as exc:
@@ -509,6 +549,8 @@ class Bridge:
                 self.transport.disconnect()
                 return RESCAN_BACKOFF_S
             self._connected_at = time.monotonic()
+            self._connection_open = True
+            self._frames_this_connection = 0
             self.emit({"t": "link", "state": "connected",
                        "addr": device.address, "name": device.name})
 
@@ -529,6 +571,7 @@ class Bridge:
                        "answered_s": self._answered_s()})
             self.transport.disconnect()
             self._close_store_bout_after_link_loss()
+            self._end_connection("silence")
             return POLL_INTERVAL_S
 
         try:
@@ -538,6 +581,7 @@ class Bridge:
                        "answered_s": self._answered_s()})
             self.transport.disconnect()
             self._close_store_bout_after_link_loss()
+            self._end_connection("poll_failed")
             # One prompt reconnect attempt. If the pad has actually gone, find()
             # returns None and the long backoff takes over from there.
             return POLL_INTERVAL_S
@@ -584,6 +628,10 @@ class Bridge:
         try:
             self._loop.run()
         finally:
+            # Before close(): a connection still open at exit is the ONLY kind
+            # whose answered_s says nothing about the mute, and leaving it out
+            # would bias the log toward connections that died on their own.
+            self._end_connection("shutdown")
             if self.store is not None:
                 self.store.close()
             self.transport.disconnect()

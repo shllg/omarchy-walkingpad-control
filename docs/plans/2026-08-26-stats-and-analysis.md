@@ -210,6 +210,56 @@ Written on bout open, bout close and epoch change, and otherwise at most once ev
 10 s of `attributed`, which surfaces as a spurious ≤10 s residual — and §2.2 makes
 even that repairable from the samples.
 
+### 2.5 `links.jsonl` — diagnostic, added 2026-08-28
+
+One row per BLE connection that has **ended**. Roughly 90 bytes.
+
+```json
+{"t":1756404123.4,"conn_s":44.1,"answered_s":29.04,"frames":29,"why":"silence"}
+```
+
+| key | meaning |
+|---|---|
+| `t` | wall clock the connection ended, epoch seconds |
+| `conn_s` | how long the connection existed at all |
+| `answered_s` | how long the pad replied on it; `0.0` means it never did |
+| `frames` | status frames decoded on this connection |
+| `why` | `silence` (the D-4 watchdog), `dropped` (BlueZ let go), `poll_failed`, `command_failed`, `shutdown` |
+
+**Why it exists.** Design spec open question 9. The pad answers for around 29 s
+after a connection and then goes quiet while its radio keeps acknowledging every
+packet, yet one session on 2026-08-26 answered for 1988 s on the same pad,
+firmware and code. `answered_s` was added to the bridge's `link/lost` event to
+make that visible, but it only ever reached stdout — and
+`WalkingpadService.qml`'s `handleLink` reads `state` and `msg` and drops the
+rest. So the one mode that could accumulate hundreds of connections, ordinary
+daily use, was recording nothing at all. This file is where that accumulates.
+
+**Why `frames` as well as `answered_s`.** A window alone cannot separate
+"replied steadily for 29 s" from "replied twice, 29 s apart". The count against
+`conn_s` is what shows the cadence, and the ~29 s claim is a claim about the
+first shape.
+
+**Why one row per ENDED connection, never per link transition.** Fact 3 makes a
+sleeping pad the normal resting state, and the bridge re-emits `absent` on every
+rescan for as long as that lasts. A row per transition would grow without bound
+while precisely nothing was happening. A connection that was never established
+writes nothing, so an absent pad costs no bytes at all. The worst case is an
+awake pad muting on its ~48 s cycle: about 1 800 rows and 160 KB in a full day,
+the same order as a day of §2.2 samples.
+
+⚠ **Nothing may read this back into attribution.** §2.2 keeps history
+rebuildable from samples alone, and every store written before this file existed
+must keep reading identically. `LINK_GAP_S` therefore stays inferred from the
+wall-clock gap between samples and is *not* replaced by these rows. This is
+evidence for one open question, not an input to the attribution model;
+`tests/test_store.py::test_the_link_log_never_feeds_attribution` runs the same
+frames with and without link rows and pins the two byte-identical.
+
+Read it with `bin/walkingpad-stats links`, which reports the spread of
+`answered_s` and the longest windows verbatim. It has no UI and is not meant to
+get one: when question 9 closes, this file and that subcommand go with it.
+
 ---
 
 ## 3. Three processes, three jobs
@@ -248,6 +298,7 @@ walkingpad-stats sessions [--since ISO] [--until ISO] [--gap MIN]
 walkingpad-stats session  --start EPOCH [--gap MIN]      # one session + its samples
 walkingpad-stats totals   --by day|week|month|all
 walkingpad-stats residuals
+walkingpad-stats links     [--since ISO] [--until ISO] [--top N]  # §2.5, diagnostic
 ```
 
 All accept `--store PATH`. All emit exactly one JSON object.

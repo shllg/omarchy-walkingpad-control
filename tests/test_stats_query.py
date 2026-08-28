@@ -1099,3 +1099,109 @@ def test_sessions_do_not_block_on_a_fifo_bouts_file(tmp_path):
     assert payload["sessions"] == []
     assert payload["skipped_rows"] == 1
 
+
+
+def write_link(store_dir, *, t, conn_s, answered_s, frames, why):
+    payload = {"t": float(t), "conn_s": conn_s, "answered_s": answered_s,
+               "frames": frames, "why": why}
+    append_json(store_dir / "links.jsonl", payload)
+    return payload
+
+
+def test_links_on_a_store_with_no_link_log_is_empty_not_an_error(tmp_path):
+    # links.jsonl only appears once a connection has ended, so every store
+    # written before design §2.5 existed has none. That must read as "nothing
+    # recorded", never as a failed query -- and never as a JSON NaN, which is
+    # what an average over zero connections would otherwise produce.
+    payload = result_json(run_stats(tmp_path, "links"))
+    assert payload["n"] == 0
+    assert payload["answered_s"] is None
+    assert payload["conn_s"] is None
+    assert payload["why"] == {}
+    assert payload["longest"] == []
+
+
+def test_links_reports_the_distribution_open_question_9_turns_on(tmp_path):
+    # The question is whether the ~29 s window is a constant. One session
+    # answered for 1988 s and every session since has muted near 29 s, so an
+    # average over the two regimes describes neither -- the spread and the
+    # longest rows verbatim are the answer, which is why both are reported.
+    for index in range(9):
+        write_link(tmp_path, t=1000 + index, conn_s=44.0, answered_s=29.0,
+                   frames=29, why="silence")
+    write_link(tmp_path, t=2000, conn_s=2003.0, answered_s=1988.0,
+               frames=1900, why="shutdown")
+
+    payload = result_json(run_stats(tmp_path, "links"))
+
+    assert payload["n"] == 10
+    assert payload["answered_s"]["min"] == 29.0
+    assert payload["answered_s"]["p50"] == 29.0
+    assert payload["answered_s"]["p90"] == 29.0
+    assert payload["answered_s"]["max"] == 1988.0
+    assert payload["why"] == {"silence": 9, "shutdown": 1}
+    assert payload["first_t"] == 1000.0
+    assert payload["last_t"] == 2000.0
+    assert payload["skipped_rows"] == 0
+
+
+def test_links_separates_a_connection_that_never_answered(tmp_path):
+    # A pad that never replied at all is a different failure from a short
+    # window, and averaging the two together hides both. Fact 9's corollary
+    # makes the first shape real: a stranded link can be adopted and then say
+    # nothing whatsoever.
+    write_link(tmp_path, t=1000, conn_s=15.1, answered_s=0.0, frames=0,
+               why="silence")
+    write_link(tmp_path, t=1100, conn_s=44.0, answered_s=29.0, frames=29,
+               why="silence")
+
+    payload = result_json(run_stats(tmp_path, "links"))
+    assert payload["never_answered"] == 1
+    assert payload["answered_s"]["min"] == 0.0
+
+
+def test_links_returns_the_longest_windows_verbatim(tmp_path):
+    for index, answered in enumerate((5.0, 60.0, 29.0, 1988.0)):
+        write_link(tmp_path, t=1000 + index, conn_s=answered + 15.0,
+                   answered_s=answered, frames=int(answered), why="silence")
+
+    payload = result_json(run_stats(tmp_path, "links", "--top", "2"))
+
+    assert [row["answered_s"] for row in payload["longest"]] == [1988.0, 60.0]
+    # Whole rows, not just the number: the frame count against conn_s is what
+    # separates "answered steadily" from "answered twice, far apart".
+    assert payload["longest"][0]["frames"] == 1988
+    assert payload["longest"][0]["conn_s"] == 2003.0
+
+
+def test_links_filters_by_since_and_until(tmp_path):
+    write_link(tmp_path, t=epoch(2026, 8, 26, 12), conn_s=2003.0,
+               answered_s=1988.0, frames=1900, why="shutdown")
+    write_link(tmp_path, t=epoch(2026, 8, 27, 12), conn_s=44.0,
+               answered_s=29.0, frames=29, why="silence")
+
+    payload = result_json(
+        run_stats(tmp_path, "links", "--since", "2026-08-27T00:00:00"))
+    assert payload["n"] == 1
+    assert payload["answered_s"]["max"] == 29.0
+
+
+def test_links_costs_a_torn_row_only_itself(tmp_path):
+    # Stage 3 §2.2/§2.3 never prune these durable files, so a hand-edited or
+    # half-written row must not cost every later query.
+    write_link(tmp_path, t=1000, conn_s=44.0, answered_s=29.0, frames=29,
+               why="silence")
+    (tmp_path / "links.jsonl").open("a", encoding="utf-8").write(
+        '{"t":1001,"conn_s":44.0,"answered_s":"twenty-nine"}\n')
+    write_link(tmp_path, t=1002, conn_s=44.0, answered_s=30.0, frames=30,
+               why="silence")
+
+    payload = result_json(run_stats(tmp_path, "links"))
+    assert payload["n"] == 2
+    assert payload["skipped_rows"] == 1
+
+
+def test_links_rejects_a_top_of_zero(tmp_path):
+    payload = result_json(run_stats(tmp_path, "links", "--top", "0"),
+                          expected_code=1)
+    assert "error" in payload

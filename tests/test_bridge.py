@@ -206,6 +206,163 @@ def test_a_connection_that_never_answered_reports_no_window():
     assert lost[0]["answered_s"] == 0.0
 
 
+class RecordingStore:
+    """Only the two Store methods the link paths call."""
+
+    def __init__(self):
+        self.links = []
+        self.bouts_closed = 0
+
+    def record_link(self, conn_s, answered_s, frames, why):
+        self.links.append({"conn_s": conn_s, "answered_s": answered_s,
+                           "frames": frames, "why": why})
+
+    def close_open_bout(self):
+        self.bouts_closed += 1
+
+
+def test_an_ended_connection_is_written_to_the_link_log():
+    # Design §2.5. answered_s was added to link/lost on 2026-08-27 and reaches
+    # only stdout; WalkingpadService.qml reads state and msg and drops the rest,
+    # so the installed plugin -- the only thing that runs for days at a time --
+    # was recording nothing at all for open question 9.
+    import time as _time
+    t = FakeTransport()
+    store = RecordingStore()
+    b = Bridge(transport=t, store=store)
+    b.emit = lambda obj: None
+    now = _time.monotonic()
+    b._connection_open = True
+    b._connected_at = now - 44.1
+    b._last_status_at = now - 15.06
+    b._frames_this_connection = 29
+
+    b._service_link()
+
+    assert len(store.links) == 1
+    assert store.links[0]["why"] == "silence"
+    assert store.links[0]["answered_s"] == 29.04
+    assert store.links[0]["frames"] == 29
+    assert 44.0 <= store.links[0]["conn_s"] <= 44.3
+
+
+def test_an_absent_pad_writes_no_link_rows():
+    # ⚠ The bound on this file. Fact 3 makes a sleeping pad the normal resting
+    # state and the bridge re-emits "absent" on every rescan for as long as that
+    # lasts, so a row per link TRANSITION would grow without limit while
+    # precisely nothing happened. Only a connection that existed may end.
+    t = FakeTransport()
+    t.connected = False
+    store = RecordingStore()
+    b = Bridge(transport=t, store=store)
+    b.emit = lambda obj: None
+
+    for _ in range(5):
+        b._service_link()
+
+    assert store.links == []
+
+
+def test_a_connection_bluez_dropped_is_recorded_as_dropped():
+    # Distinguished from the watchdog on purpose: open question 9 is about what
+    # ends a connection, and "BlueZ let go by itself" is a different answer from
+    # "the pad stopped replying while its radio kept acknowledging".
+    import time as _time
+    t = FakeTransport()
+    t.connected = False
+    store = RecordingStore()
+    b = Bridge(transport=t, store=store)
+    b.emit = lambda obj: None
+    now = _time.monotonic()
+    b._connection_open = True
+    b._connected_at = now - 30.0
+    b._last_status_at = now - 1.0
+
+    b._service_link()
+
+    assert [link["why"] for link in store.links] == ["dropped"]
+
+
+def test_a_connection_is_recorded_once_even_if_two_paths_tear_it_down():
+    # _service_link can end a connection and then fail again on the next tick
+    # before a new one exists. Counting that twice would double every row in the
+    # log and make the mute look twice as frequent as it is.
+    import time as _time
+    t = FakeTransport()
+    store = RecordingStore()
+    b = Bridge(transport=t, store=store)
+    b.emit = lambda obj: None
+    b._connection_open = True
+    b._connected_at = _time.monotonic() - 60.0
+
+    b._service_link()
+    b._service_link()
+
+    assert len(store.links) == 1
+
+
+def test_a_link_lost_under_a_command_is_recorded_and_reports_its_window():
+    # §4.1 promises answered_s on every lost link. This path emitted one without
+    # it until 2026-08-28, and it is the most informative of them: the link died
+    # under a command someone was waiting on, which is how open question 9
+    # actually reaches a user.
+    import time as _time
+
+    class Refusing(FakeTransport):
+        def write(self, payload):
+            raise RuntimeError("le-connection-abort-by-local")
+
+    t = Refusing()
+    store = RecordingStore()
+    b = Bridge(transport=t, store=store)
+    emitted = []
+    b.emit = emitted.append
+    now = _time.monotonic()
+    b._connection_open = True
+    b._connected_at = now - 40.0
+    b._last_status_at = now - 11.0
+
+    assert b._send(frames.stop()) is False
+
+    lost = [o for o in emitted if o.get("state") == "lost"]
+    assert len(lost) == 1
+    assert lost[0]["answered_s"] == 29.0
+    assert [link["why"] for link in store.links] == ["command_failed"]
+
+
+class FakeDevice:
+    address = "<pad-addr>"
+    name = "KS-BLC2"
+
+
+def test_the_frame_count_covers_only_the_current_connection():
+    # frames against conn_s is what shows the cadence, and a count carried over
+    # from the previous connection would report a pad that answered steadily
+    # when it had in fact answered twice, half a minute apart.
+    import time as _time
+
+    class Finding(FakeTransport):
+        def find(self, should_continue=None):
+            return FakeDevice()
+
+    t = Finding()
+    store = RecordingStore()
+    b = Bridge(transport=t, store=store)
+    b.emit = lambda obj: None
+    b._connection_open = True
+    b._connected_at = _time.monotonic() - 60.0
+    b._frames_this_connection = 29
+
+    b._service_link()                 # the watchdog ends the old connection
+    assert store.links[0]["frames"] == 29
+    t.connected = False
+    b._service_link()                 # and this one establishes a new one
+
+    assert b._connection_open is True
+    assert b._frames_this_connection == 0
+    assert len(store.links) == 1
+
+
 def test_a_speaking_link_is_kept_and_polled():
     import time as _time
     t = FakeTransport()

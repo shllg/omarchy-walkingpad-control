@@ -129,6 +129,16 @@ def bucket_argument(value):
     return seconds
 
 
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a whole number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return parsed
+
+
 def build_parser():
     parser = JsonArgumentParser(
         description="Read WalkingPad history (stdout JSON)", add_help=False)
@@ -164,6 +174,12 @@ def build_parser():
     # where the window expected data.
     profile.add_argument("--gap", type=finite_nonnegative_float, default=5.0)
     profile.add_argument("--store", default=default_store_dir())
+
+    links = commands.add_parser("links", add_help=False)
+    links.add_argument("--since")
+    links.add_argument("--until")
+    links.add_argument("--top", type=positive_int, default=5)
+    links.add_argument("--store", default=default_store_dir())
 
     residuals = commands.add_parser("residuals", add_help=False)
     residuals.add_argument("--store", default=default_store_dir())
@@ -221,6 +237,16 @@ def validate_sample(sample):
     require_type(sample["pe"], int, "sample.pe")
 
 
+def validate_link(link):
+    if not isinstance(link, dict):
+        raise ValueError("links.jsonl row is not an object")
+    require_number(link["t"], "link.t")
+    require_number(link["conn_s"], "link.conn_s")
+    require_number(link["answered_s"], "link.answered_s")
+    require_type(link["frames"], int, "link.frames")
+    require_type(link["why"], str, "link.why")
+
+
 def iter_jsonl(path, validator, skipped_rows):
     """Yield validated rows one at a time, counting unreadable ones.
 
@@ -264,6 +290,10 @@ def read_jsonl(path, validator):
 
 def read_bouts(store_dir):
     return read_jsonl(os.path.join(store_dir, "bouts.jsonl"), validate_bout)
+
+
+def read_links(store_dir):
+    return read_jsonl(os.path.join(store_dir, "links.jsonl"), validate_link)
 
 
 def parse_iso(value):
@@ -786,6 +816,71 @@ def query_residuals(args):
     }
 
 
+def summarise(values):
+    """min/median/p90/max/mean over one field, or None when there is nothing.
+
+    Nearest-rank on the sorted values, with no interpolation. The population is
+    a few hundred connections at most and the question is which regime they fall
+    into, so an interpolated quantile would invent a duration no connection had.
+    """
+    if not values:
+        return None
+    ordered = sorted(values)
+
+    def rank(fraction):
+        index = int(math.ceil(fraction * len(ordered))) - 1
+        return ordered[max(0, min(index, len(ordered) - 1))]
+
+    return {
+        "min": ordered[0],
+        "p50": rank(0.5),
+        "p90": rank(0.9),
+        "max": ordered[-1],
+        "mean": round(sum(ordered) / len(ordered), 2),
+    }
+
+
+def query_links(args):
+    """Summarise ended BLE connections, for design spec open question 9.
+
+    The question is whether the pad's ~29 s answering window is a constant. One
+    session answered for 1988 s and every session since has muted near 29 s, so
+    what matters is the SHAPE of the distribution and the longest outliers, not
+    an average -- an average over two regimes describes neither. `longest`
+    returns those rows verbatim for that reason.
+    """
+    links, skipped_rows = read_links(args.store)
+    since_ts = parse_iso(args.since)
+    until_ts = parse_iso(args.until)
+    links = [
+        link for link in links
+        if (since_ts is None or link["t"] >= since_ts)
+        and (until_ts is None or link["t"] <= until_ts)
+    ]
+    ordered = sorted(links, key=lambda link: link["t"])
+
+    why = {}
+    for link in ordered:
+        why[link["why"]] = why.get(link["why"], 0) + 1
+
+    return {
+        "n": len(ordered),
+        "first_t": ordered[0]["t"] if ordered else None,
+        "last_t": ordered[-1]["t"] if ordered else None,
+        "answered_s": summarise([link["answered_s"] for link in ordered]),
+        "conn_s": summarise([link["conn_s"] for link in ordered]),
+        # A connection that never answered at all is a different failure from a
+        # short window, and averaging the two together hides both.
+        "never_answered": sum(1 for link in ordered
+                              if link["answered_s"] == 0),
+        "why": why,
+        "longest": sorted(ordered,
+                          key=lambda link: link["answered_s"],
+                          reverse=True)[:args.top],
+        "skipped_rows": skipped_rows,
+    }
+
+
 def dispatch(args):
     if args.command == "sessions":
         return query_sessions(args)
@@ -795,6 +890,8 @@ def dispatch(args):
         return query_totals(args)
     if args.command == "profile":
         return query_profile(args)
+    if args.command == "links":
+        return query_links(args)
     return query_residuals(args)
 
 

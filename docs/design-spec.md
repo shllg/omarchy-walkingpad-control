@@ -194,7 +194,15 @@ press in three here, on a pad that is awake and a metre away.
 before going quiet, and `0.0` means it never replied at all. It exists for open
 question 9: this pad has been measured answering for ~29 s and then falling
 silent with its radio still acknowledging every packet, and without this number
-that condition is indistinguishable from an ordinary reconnect in any log.
+that condition is indistinguishable from an ordinary reconnect in any log. Every
+path that loses a link carries it, including the one that fails under a command
+someone was waiting on.
+
+⚠ **Reaching stdout is not enough, and was not.** `WalkingpadService.qml`'s
+`handleLink` reads `state` and `msg` and drops the rest, so under the installed
+plugin -- the only thing that runs for days at a time -- this number went
+nowhere. The bridge now also writes one row per ended connection to
+`links.jsonl`; the stats plan §2.5 is its format and the reason it is bounded.
 
 `pad_set_speed` is what the pad has stored from the last BLE speed command; it
 reads 0.0 when the speed was most recently set at the panel (AGENTS.md fact 15).
@@ -825,6 +833,15 @@ submission (`docs/plugin-evidence.md`).
    before that session), the Bluetooth daemon, the BLE controller, and contention
    from a second BLE client (the mute predates the second process by nearly two
    hours).
+
+   **Now recording, 2026-08-28.** The remaining half of this question needs a
+   population of connections, not another argument: what would settle it is a
+   second run like 2026-08-26's, or a pattern in what the long windows have in
+   common. Every ended connection is therefore written to `links.jsonl` with
+   its window, its frame count and what ended it (stats plan §2.5), and
+   `bin/walkingpad-stats links` reports the spread and the longest windows
+   verbatim. Ordinary use now accumulates the evidence; nothing about the
+   bridge's behaviour changed, and no timing was designed against.
 
    ⚠ An earlier version of this paragraph eliminated BlueZ because `bluetoothd`
    had been one continuous process across both sessions. That is backwards --

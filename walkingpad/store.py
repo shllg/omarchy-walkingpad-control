@@ -107,6 +107,7 @@ class Store:
         self._samples_dir = self._root / "samples"
         self._bouts_path = self._root / "bouts.jsonl"
         self._state_path = self._root / "state.json"
+        self._links_path = self._root / "links.jsonl"
 
         # Design §3.1 requires a full disk or permission error to degrade to
         # "no stats", never a bridge crash that takes belt controls with it. The
@@ -185,6 +186,42 @@ class Store:
             return
         try:
             self._record_inner(status, commanded_speed, goal_speed)
+        except Exception as exc:
+            self._fail(exc)
+
+    def record_link(self, conn_s, answered_s, frames, why):
+        """Append one row for a BLE connection that has just ended.
+
+        Design spec open question 9: this pad answers status queries for around
+        29 s after a connection and then goes quiet while its radio keeps
+        acknowledging every packet, yet one earlier session answered for 1988 s
+        on the same pad, firmware and code. Nothing distinguishes the two from
+        the outside, and the trigger is still unknown.
+
+        `answered_s` was added to the bridge's `link/lost` event to make that
+        visible, but it only ever reached stdout, and the installed plugin's
+        service reads `state` and `msg` and drops the rest. So the one mode that
+        could accumulate hundreds of connections -- ordinary daily use -- was
+        recording nothing at all. This file is where that accumulates.
+
+        ⚠ ONE ROW PER ENDED CONNECTION, never one per link transition. Fact 3
+        makes a sleeping pad the normal resting state, and the bridge re-emits
+        `absent` on every rescan for as long as that lasts; a row per transition
+        would grow without bound while precisely nothing was happening. A row is
+        written only when a connection that actually existed has ended, so an
+        absent pad writes nothing.
+
+        ⚠ NOTHING MAY READ THIS BACK INTO ATTRIBUTION. Design §2.2 keeps history
+        rebuildable from samples alone, and every store written before this file
+        existed must keep reading identically -- so LINK_GAP_S stays inferred
+        from the wall-clock gap between samples, exactly as the note above it
+        says, and is not replaced by these rows. This is diagnostic evidence for
+        one open question, not an input to the attribution model.
+        """
+        if self._disabled:
+            return
+        try:
+            self._write_link(conn_s, answered_s, frames, why)
         except Exception as exc:
             self._fail(exc)
 
@@ -491,6 +528,24 @@ class Store:
         path = self._samples_dir / f"{date}.jsonl"
         with os.fdopen(
             _open_leaf(path, _APPEND_FLAGS), "a", encoding="utf-8"
+        ) as fh:
+            fh.write(json.dumps(row) + "\n")
+            fh.flush()
+
+    def _write_link(self, conn_s, answered_s, frames, why):
+        # Around 90 bytes, and bounded by how often a connection ends: with the
+        # mute that is roughly one per ~48 s cycle while the pad is awake, and
+        # nothing at all while it sleeps. Same append-and-flush durability as
+        # every other row here (design §3.1).
+        row = {
+            "t": self._now(),
+            "conn_s": conn_s,
+            "answered_s": answered_s,
+            "frames": frames,
+            "why": why,
+        }
+        with os.fdopen(
+            _open_leaf(self._links_path, _APPEND_FLAGS), "a", encoding="utf-8"
         ) as fh:
             fh.write(json.dumps(row) + "\n")
             fh.flush()
