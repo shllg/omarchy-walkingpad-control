@@ -907,6 +907,30 @@ submission (`docs/plugin-evidence.md`).
    Neither began at anything the bridge did. Nothing yet distinguishes the two
    populations, and one coincidence is not a cause.
 
+   **The whole day, read at 20:51 on 2026-08-28: 262 connections, one escape.**
+   Covering 13:56:11 to 20:51:11, mostly ordinary use with no procedure running.
+   Two things firmed up and nothing closed.
+
+   - **The mute band is now 254 connections wide and does not drift**, spanning
+     28.08–29.16 s — 1.08 s across seven hours, the day's first row at 28.09 s
+     and its last at 28.12 s, over frame counts of 15 to 36. The timer finding
+     above no longer rests on 39 rows.
+   - ⚠ **Nothing at all sits between 30 s and 60 s.** A connection either mutes
+     at ~29 s or does not mute; there is no middle population being cut short at
+     varying points.
+   - **No new escape.** The only >60 s row of the day is the 2561 s connection
+     already named above. Seven hours produced no second clean instance, so this
+     half of the question still stands on two cases and is no closer to a cause.
+   - ⚠ **The 88.29 s row is not a third instance and must be excluded.** Its
+     connection ran 18:09:21–18:10:51 and fully contains a second 8.6 s
+     connection — two local clients on the one link (fact 5) — inside a cluster
+     of four `shutdown` rows from a run of bridge restarts. Stats plan §2.5's
+     exclusion rule exists for exactly this row.
+
+   So the evidence needed is a second day that contains another escape.
+   `docs/protocol-evidence.md`, "The first full day of that log", holds the
+   numbers. Nothing about the bridge changed as a result of reading them.
+
    ⚠ An earlier version of this paragraph eliminated BlueZ because `bluetoothd`
    had been one continuous process across both sessions. That is backwards --
    continuity is the precondition for accumulated state -- and it is retracted in

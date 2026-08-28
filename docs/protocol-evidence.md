@@ -532,6 +532,49 @@ describes neither.
 ⚠ Nothing about the bridge's timing changed, and none of this is read back into
 attribution. Recording the window is not the same as designing against it.
 
+### The first full day of that log: 262 connections, one escape (2026-08-28)
+
+Read at 20:51, covering 13:56:11 to 20:51:11 -- 6.9 hours during which no
+procedure was running for most of the time.
+
+| `answered_s` | connections |
+|---|---|
+| < 1 s | 1 |
+| 1 -- 27 s | 5 |
+| **28.08 -- 29.16 s** | **254** |
+| 30 -- 60 s | **0** |
+| > 60 s | 2 |
+
+**The mute does not drift.** The whole band spans 1.08 s across seven hours: the
+day's first row answered 28.09 s and its last answered 28.12 s. Frame counts
+inside the band run 15 to 36, so "it is a timer, not a count of replies" now
+rests on 254 rows rather than 39.
+
+**The empty 30--60 s band is the new result.** A connection either mutes at
+~29 s or does not mute at all. Nothing in this population sits between the two,
+so whatever ends the answering is not a continuum being cut short at varying
+points.
+
+**Only one connection escaped, and it is the one already recorded above:**
+2560.93 s over 1515 frames, ended at 15:09:44 by a deliberate shell restart.
+Seven hours of ordinary use produced no second clean instance. The
+"occasionally answers indefinitely" half of design spec question 9 therefore
+still stands on the same two cases, 1988 s on 2026-08-26 and this one.
+
+⚠ **The 88.29 s row is NOT a third instance. Exclude it.** Its connection ran
+18:09:21 to 18:10:51 and ended `dropped` -- and it fully contains a second,
+8.6 s connection that ended at 18:10:48 with `why: shutdown`. Two overlapping
+rows are two local clients sharing the one link (fact 5), and it sits inside a
+cluster of four `shutdown` rows between 18:10:48 and 18:13:58, which is a run of
+deliberate bridge restarts. Stats plan §2.5 already requires such rows to be
+excluded before reasoning about question 9; this is that rule doing its job on
+the first row that tempted anyone to break it.
+
+The `answered_s: 0.0` row is the stranded link §2.5 already describes, unchanged.
+
+**What follows from this: nothing in the bridge.** What would settle question 9
+is a second day containing another escape, not a closer reading of this one.
+
 
 ## Two observations from 2026-08-28, neither of them measured
 
