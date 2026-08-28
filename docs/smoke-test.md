@@ -271,14 +271,57 @@ Only after 4b. `omarchy plugin add` this repository, enable it, then confirm eac
 of these against the bar icon and popup:
 
 1. Icon alone in the bar, no text. `nf-md-walk` when not running, `nf-md-run`
-   while the belt moves, dimmed while the pad is asleep.
+   while the belt moves.
+
+   ⚠ **Dimming tracks the BRIDGE’s link, not the pad’s sleep.**
+   `Model.barDimmed()` is `linkState !== "connected"`, so while open question 9
+   stands the icon dims and returns roughly every 48 s with the pad awake and a
+   metre away. **Expect that flap.** It is neither a fault nor a rendering
+   defect, and it is not evidence about sleep. This check’s original wording
+   ("dimmed while the pad is asleep") assumed a mute that does not exist, and
+   was rewritten on 2026-08-28 rather than the code being changed to match it.
 2. With the pad awake and idle, the popup shows the session stats AND the standby
    instruction line only when `mode` actually reads `standby` — not permanently.
    Getting this wrong was the defect that motivated the panel.
-3. Right-click the bar icon with the belt stopped. Expect a refusal naming the
-   panel and the remote, and expect the belt NOT to start (fact 16).
-4. Press −0.5 four times quickly while the belt runs. Expect ONE speed change of
-   one step, not four, and no `repeat_suppressed` for the distinct values.
+3. Right-click the bar icon with the belt stopped **and the popup CLOSED**.
+   Expect the belt NOT to start (fact 16), and expect all three of these:
+   1. the bar icon takes the bar’s attention colour for about ten seconds;
+   2. hovering it within that window shows the state line plus
+      `Stop refused — use the panel or remote`;
+   3. opening the popup within that window still shows the full refusal, naming
+      the panel and the remote — it must not be wiped by the act of opening.
+
+   Then wait past ten seconds and open the popup again. Expect the instruction
+   line to be gone: a refusal is a press that failed, not a standing condition.
+
+   ⚠ **This is the step the check was missing**, and it is why it exists. On
+   2026-08-28 the belt did not start, correctly, and the operator reported
+   "right click does not do anything" — an accurate description of what there
+   was to see, because the refusal rendered only inside a popup nobody had
+   open. It stopped being cosmetic the same day: during §4d the operator pressed
+   Stop **while standing on a moving belt**, saw no reaction, and stepped off.
+   Fact 18 exempts stop from throttling so that a second press is the recovery,
+   and that only works if the first press visibly failed.
+4. Press −0.5 four times quickly while the belt runs, starting from a known
+   goal. Expect:
+   - the goal to fall by **the full 2.0 km/h** — four presses of a button
+     labelled −0.5 mean −2.0, floored at `minGoal` (0.5 km/h);
+   - **every goal to sit on a multiple of the step**, never 3.1 or 2.1. Run this
+     once more from a belt that is still ramping out of a start, with no goal
+     set: that is the state that produced the off-grid defect below, and an
+     on-grid start cannot reproduce it;
+   - **one** `goal` command on the wire, not four. The 250 ms `goalDebounce`
+     sends the settled value once;
+   - no `repeat_suppressed`. Only one command is sent, and consecutive goals
+     carry distinct values in any case;
+   - the belt to lag behind the goal and ramp toward it at ~0.25 km/h per second
+     (fact 2). The readout catching up slowly is the pad, not the plugin.
+
+   ⚠ Rewritten 2026-08-28. This check used to ask for "ONE speed change of one
+   step", which describes the one-shot `setSpeed` path. The buttons drive
+   `setGoal()` and have since the goal servo landed, and `8182722` then removed
+   the lead bound that made three presses from 2.0 km/h reach 3.0 instead of
+   3.5. The old expectation would now fail against correct behaviour.
 5. Kill the bridge process by hand. Expect the widget to recover within a few
    seconds, and after four kills in a minute to show a hard error rather than
    respawning forever.
@@ -342,6 +385,101 @@ of these against the bar icon and popup:
      against what the goal does before running it.
   5. **Half PASS.** One kill, widget recovered in seconds. The four-kills-in-a-
      minute half is still unrun.
+
+  **What changed after that run, before the next one.** Checks 1, 3 and 4 above
+  were rewritten on 2026-08-28 against what the code does. Check 3 also gained
+  the three "where does the user see it" sub-steps, and the gap it found was
+  closed rather than only documented: a live refusal now colours the bar icon
+  for ten seconds, names itself in the tooltip, and survives the popup being
+  opened to read it. So checks 1, 2 and 3 must all be **re-run** — 1 and 3
+  against new expectations, and 2 because it has never been run against this
+  build.
+
+- **2026-08-28, second run — check 3 PASSED in full, and found one defect.**
+  Run against the build that closed the invisibility gap, after
+  `omarchy restart shell`. Belt stopped, popup closed, one right-click:
+
+  1. **The belt stayed stopped.** Confirmed independently from the store — zero
+     `running` frames after the stop, so the fact 16 toggle was gated as designed.
+  2. **The bar icon changed colour for the dwell.** ⚠ It came up **red** — see
+     the defect below.
+  3. **The tooltip carried the refusal**, reading `Stop refused — use…` on its
+     second line.
+  4. **Opening the popup kept the full refusal.** This is the half that used to
+     fail: `onOpenedChanged` cleared the error unconditionally, so opening the
+     popup to find out what happened wiped the explanation on the way in.
+
+  Also confirmed the same session, though not a §4c check: **right-click stop on
+  a MOVING belt works.** 18 accepted stops are in the day's samples, the last at
+  `1787931183` showing `v: 0.2` decelerating to `0.0`.
+
+  ⚠ **Defect found and fixed the same day: the bar icon painted every refusal in
+  the alarm colour.** `WidgetButton` defaults `activeColor` to `bar.urgent`, and
+  `Commons/Color.qml:76` defines `Color.bar.active` as
+  `pick("bar.active", root.urgent)` — a fallback to the alarm hue for any theme
+  that does not define `bar.active`. Neither theme on the author's machine does.
+
+  This is the **same defect the popup was corrected for on 2026-08-25**, when a
+  stop refused on a stopped belt came back in alarm red, reproduced on a new
+  surface. It got the same answer: `Model.isAdvisory()` now splits the bar icon
+  too, so an expected refusal gets `accent` and only a genuinely broken plugin
+  gets `urgent`. ✅ **Confirmed on hardware the same day**, after a second
+  `omarchy restart shell`: a stop refused on a stopped belt now comes up in the
+  accent role, and the rest of check 3 behaves as it did. **Check 3 is signed
+  off in full.**
+
+  ⚠⚠ **Second defect, found the same day by pressing + rather than by running a
+  check: the goal came off the step grid, reading 3.1.** Reported by the
+  operator as "Multi ++ pressed → 3.1 → WTF why?".
+
+  **Root cause.** `speedBy()` seeded the goal from `state.currentSpeed` when no
+  goal was set yet — the belt's ACTUAL speed. Fact 2 is the trap: reported speed
+  is actual rather than target and the pad ramps ~0.25 km/h per second, so the
+  base was wherever the ramp stood at the instant of the press, at the pad's 0.1
+  resolution. `base + delta` then carried that offset through every later press.
+
+  **Caught in the store, not by eye:**
+
+      t=…853.14  v: 2.0  c: 2.1  g: 2.1   pe: 2   ← 2 s after start, ramping
+      t=…855.14  v: 2.1  c: 2.6  g: 3.1           ← two more presses
+
+  `2.1 = 1.6 + 0.5`, and 1.6 km/h is where the ramp was. Every goal set that day
+  on a settled belt was clean: 3.5, 1.5, 2.0, 2.5, 5.0.
+
+  **Fixed** by moving to the next grid multiple strictly in the pressed
+  direction. On the grid — every press after the first — that is exactly
+  `base + delta`, so `8182722`'s "N presses mean N steps" is untouched. Off the
+  grid, the first press moves LESS than one step rather than more, which is the
+  safe direction with someone on the belt.
+
+  ⚠ **This arithmetic has no automated test.** It is QML-side JavaScript, and
+  ADR D-1 puts testable logic in Python precisely because QML cannot be reached
+  by pytest. It was verified by hand against a table of bases including the
+  clamp edges. Check 4 is the only gate on it, which is why the check above now
+  requires a run from a ramping belt.
+
+  ✅ **Check 5's second half PASSED, 2026-08-28.** Four SIGTERMs to the bridge
+  at t+6, t+24, t+37 and t+49 s — all inside 43 s, with gaps of 18, 13 and 12 s,
+  each well under the 60 s `respawnWindow` that resets the counter:
+
+      kill 1  respawned      kill 3  respawned
+      kill 2  respawned      kill 4  NOT respawned, and still down at t+68
+
+  Three respawns then a hard stop, matching `WalkingpadService.qml:483`. The
+  belt was stopped throughout.
+
+  ⚠ **Trap for whoever automates this next: do not find the bridge with
+  `pgrep python3` or by matching `comm`.** Python sets the process name from the
+  script, so `comm` is the truncated `walkingpad-brid`, never `python3`. And
+  `pgrep -f walkingpad-bridge` matches the *searching shell's own command line*
+  as well, so a `| head -1` can return your own PID and kill your script instead
+  of the bridge. Both mistakes were made here, and the second one produced a
+  confident but wrong "the bridge has given up" reading while it was running
+  normally. Match on `/proc/*/cmdline` beginning `/usr/bin/python3`.
+
+  **Still unrun from this section:** check 4, which needs a running belt. Checks 1 and 2 keep their PASS from
+  the first run — check 1's rewrite changed only its wording about dimming, and
+  nothing since has touched `Model.instruction()`'s standby gate.
 
 ## 4d. The live goal — stand clear of the belt
 
