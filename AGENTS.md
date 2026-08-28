@@ -14,8 +14,9 @@ progress tracker, and completed steps are not kept there.
 
 ✅ **The two-part start (§4b) and the live goal (§4d) were signed off against
 hardware on 2026-08-27**, with the measurements in `docs/smoke-test.md`. §4c, the
-panel on hardware, is still unsigned — it is a UI procedure and needs an operator
-at the popup. That file is the live tracker for every open hardware question.
+panel on hardware, is still unsigned: checks 4 and 6 remain, and both need an
+operator on a moving belt rather than only at the popup. That file is the live
+tracker for every open hardware question.
 
 ## Non-obvious facts. Do not re-derive these, and do not "fix" them.
 

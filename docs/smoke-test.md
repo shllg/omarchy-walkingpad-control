@@ -325,6 +325,57 @@ of these against the bar icon and popup:
 5. Kill the bridge process by hand. Expect the widget to recover within a few
    seconds, and after four kills in a minute to show a hard error rather than
    respawning forever.
+6. **The popup chart, during and after a real walk.** Charts §1 defines this
+   chart and charts §6 defers its only check to this file; this is that check.
+   It needs a moving belt, so run it in the same session as check 4.
+
+   ⚠ **Restart the shell BEFORE the walk, never during it.** The chart's only
+   data source is the in-memory ring buffer in `WalkingpadService.qml`. It
+   touches no file and survives nothing, so `omarchy restart shell` empties it
+   and kills the bridge — a restart mid-walk leaves an empty chart that reads
+   exactly like a rendering fault. A QML edit does not reach the running bar
+   without that restart either, so do it first, then walk.
+
+   **6a — while walking.** Walk at least three minutes, then stand off the belt
+   for a full minute with the belt stopped, then walk again, so the run
+   contains one real gap. Expect:
+
+   - **bars within the first minute**, one per wall-clock minute, newest right;
+   - **no bar at all for the minute you did not walk** — not a zero-height bar,
+     not a flat baseline segment. That gap is the information the chart exists
+     for, and it is why the axis is real time rather than sample index;
+   - **the in-progress minute rendered distinctly** from the completed ones, and
+     no longer distinct once the next minute opens;
+   - bars that track **steps, not distance**: they vary minute to minute at a
+     steady speed rather than sitting at one height.
+
+   **6b — after stopping, belt stopped and standing clear.** The ring buffer
+   keeps the walk's samples, so the chart still has data to check against.
+
+   Cross-check the JS arithmetic against the Python. This is the point of the
+   check: charts §6 records that the two implementations diverged on first
+   write — 118 steps against 120 for the same minute — and pytest pins them only
+   at the boundaries it can reach. Read the same minutes back:
+
+       bin/walkingpad-stats profile --since <YYYY-MM-DDTHH:MM> \
+                                    --until <YYYY-MM-DDTHH:MM> --bucket 60
+
+   Each `buckets[].t` is a wall-clock minute and `buckets[].steps` is that
+   minute's total. Expect **the same minutes present and the same minutes
+   absent**, and the step totals to match the bars.
+   ⚠ `--bucket` takes whole seconds or `auto`, never `1min`, and these
+   subcommands have no `--help` despite what the plans say.
+
+   Then the keyboard zones (charts §5). Arrow up from the controls into the
+   chart. Expect the cursor to seed at the **newest** bucket, horizontal arrows
+   to move within the chart, and leaving the zone to clear the cursor.
+
+   ⚠⚠ **With the cursor in the chart zone, press Enter. Nothing must happen to
+   the belt.** `activateCursor()` is gated so Enter can never fire a belt
+   command from a non-control zone, and charts §5 marks that gate
+   safety-relevant. Run this press with the belt stopped and yourself clear of
+   it: if the gate has been relaxed, the command that fires is whichever control
+   sits at that index, and fact 16 makes a stray stop a start.
 
 **Runs so far.**
 
@@ -477,7 +528,8 @@ of these against the bar icon and popup:
   confident but wrong "the bridge has given up" reading while it was running
   normally. Match on `/proc/*/cmdline` beginning `/usr/bin/python3`.
 
-  **Still unrun from this section:** check 4, which needs a running belt. Checks 1 and 2 keep their PASS from
+  **Still unrun from this section:** checks 4 and 6, which both need a running
+  belt and are meant to ride in one session. Checks 1 and 2 keep their PASS from
   the first run — check 1's rewrite changed only its wording about dimming, and
   nothing since has touched `Model.instruction()`'s standby gate.
 
