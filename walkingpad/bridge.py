@@ -53,6 +53,15 @@ RESCAN_BACKOFF_S = 30.0        # the pad SLEEPS; absence is normal, do not storm
 LINK_DEAD_AFTER_S = 15.0       # silence this long means the link is gone, not quiet
 MIN_REPEAT_INTERVAL_S = 1.0    # a repeated command inside this window is dropped
 START_SPEED_WINDOW_S = 8.0     # how long a start may wait for the belt to move
+# How close the belt must be before a goal counts as reached. The pad reports
+# speed to 0.1 km/h, so anything finer is noise rather than distance.
+#
+# ⚠ This was max_step / 2 -- 0.25, HALF A STEP, which has nothing to do with
+# arriving. Measured on hardware 2026-08-28: a goal of 3.0 was declared reached
+# and discarded with the belt at 2.8, so three presses of "+0.5" from 2.0
+# delivered +0.8. Half a step is exactly the amount of a step a user can see
+# going missing.
+GOAL_ARRIVED_KMH = 0.1
 MAX_CONSECUTIVE_BAD_FRAMES = 10  # spec §8
 
 
@@ -244,9 +253,10 @@ class Bridge:
             # it into frames -- one clamped step per status frame. Keeping one
             # writer means a burst of goal updates cannot become a burst of
             # writes, however fast the buttons are pressed.
-            # "absolute" marks a value the user typed and committed, which is
-            # bounded by the pad's range alone. Without it this is the stepping
-            # path, where the lead bound still applies. See clamp_goal_absolute.
+            # "absolute" marks a value the user typed and committed. Both
+            # paths are bounded by the pad's range alone since the lead bound
+            # went on 2026-08-28; the flag is kept because collapsing the two
+            # is a separate change. See Safety.clamp_goal().
             requested = float(obj.get("kmh", 0))
             if obj.get("absolute"):
                 self.goal_speed = self.safety.clamp_goal_absolute(requested)
@@ -347,11 +357,15 @@ class Bridge:
 
         ⚠ This is the first thing in the bridge that writes a motion command
         without a person having just pressed something, so every guard below is
-        load-bearing. It is bounded in four independent ways: the goal itself
-        cannot sit more than max_goal_lead from the actual speed (clamp_goal),
-        each write is still one clamp_speed() step, nothing is sent unless a
-        fresh frame says the belt is running, and it stops the moment the goal
-        is reached.
+        load-bearing. It is bounded in three independent ways: each write is
+        still one clamp_speed() step from the ACTUAL speed, nothing is sent
+        unless a fresh frame says the belt is running, and it stops the moment
+        the goal is reached.
+
+        ⚠ There were four. The goal's own lead bound over the actual speed
+        (clamp_goal's max_goal_lead) was removed on 2026-08-28 -- read that
+        docstring. A repeating key can now walk the goal to max_speed, and the
+        three bounds above are what is left holding the belt.
 
         It is not the auto-retry fact 17 forbids. That rule is about re-sending
         the SAME command on a clock, which is how the countdown-cancel-countdown
@@ -379,7 +393,7 @@ class Bridge:
         if not self.safety.may_move(self._last_status_age()):
             return
 
-        if abs(status.speed_kmh - self.goal_speed) < self.safety.max_step / 2:
+        if abs(status.speed_kmh - self.goal_speed) < GOAL_ARRIVED_KMH:
             self.goal_speed = None
             return
 

@@ -5,21 +5,20 @@ Everything else here sends a frame because a person just pressed something.
 This walks the belt toward a standing intention on its own, so the tests below
 are mostly about what it REFUSES to do.
 
-The safety argument rests on four independent bounds, one test each:
-  1. a STEPPED goal cannot sit more than max_goal_lead from the actual speed
-  2. every write is still one clamp_speed() step
-  3. nothing is written unless a fresh frame says the belt is running
-  4. it stops on arrival, and never repeats a value
+The safety argument rests on three independent bounds, one test each:
+  1. every write is still one clamp_speed() step from the ACTUAL speed
+  2. nothing is written unless a fresh frame says the belt is running
+  3. it stops on arrival, and never repeats a value
 
-Bound 1 governs the repeating path only. An ABSOLUTE goal -- a value the user
-typed and committed -- is bounded by the pad's range alone; see section 5 and
-Safety.clamp_goal_absolute. Bounds 2, 3 and 4 are what keep that safe, and they
-apply identically to both paths, so section 5 re-proves 2 rather than trusting
-that it still holds.
+⚠ There was a fourth: a stepped goal could not sit more than max_goal_lead from
+the actual speed. It was removed on 2026-08-28 because it silently truncated
+presses the "+0.5" label had already promised -- see Safety.clamp_goal(). The
+three above are now the whole argument, and they apply identically to the
+stepped and absolute paths.
 """
 from walkingpad import frames
 from walkingpad.bridge import Bridge
-from walkingpad.safety import MAX_GOAL_LEAD_KMH, MIN_GOAL_KMH, Safety
+from walkingpad.safety import MIN_GOAL_KMH, Safety
 
 from tests.test_start_sequence import RecordingTransport, running_at
 
@@ -41,20 +40,33 @@ def feed(bridge, frame):
     bridge.on_notify(None, frame)
 
 
-# -- 1. the goal cannot outrun reality --------------------------------------
+# -- 1. the goal is bounded by the pad, and by nothing else -----------------
 
-def test_a_goal_is_capped_ahead_of_the_actual_speed():
-    # The bound that replaces "one gesture, one step". Without it a repeating
-    # key walks the goal to the ceiling and the belt follows it there.
+def test_a_goal_may_run_to_the_pads_ceiling():
+    # Was capped at 2.0 + 1.0 before 2026-08-28.
     b, _ = make_bridge(speed=2.0)
     b.handle_command({"cmd": "goal", "kmh": 6.0})
-    assert b.goal_speed == 2.0 + MAX_GOAL_LEAD_KMH
+    assert b.goal_speed == 6.0
 
 
-def test_a_goal_is_capped_behind_the_actual_speed_too():
+def test_a_goal_may_run_down_to_the_floor():
+    # Was capped at 4.0 - 1.0 before 2026-08-28.
     b, _ = make_bridge(speed=4.0)
-    b.handle_command({"cmd": "goal", "kmh": 0.5})
-    assert b.goal_speed == 4.0 - MAX_GOAL_LEAD_KMH
+    b.handle_command({"cmd": "goal", "kmh": 1.0})
+    assert b.goal_speed == 1.0
+
+
+def test_n_presses_of_one_step_are_worth_n_steps():
+    # The promise the button's own label makes, and the reason the lead bound
+    # went. Measured on hardware 2026-08-28: three presses of "+0.5" from
+    # 2.0 km/h produced a goal of 3.0 and a belt that settled at 2.8. The panel
+    # accumulates the presses; this pins that the bridge honours the total
+    # rather than cutting it back to where the belt happens to be.
+    b, _ = make_bridge(speed=2.0)
+    step = b.safety.max_step
+    for n in (1, 2, 3):
+        b.handle_command({"cmd": "goal", "kmh": 2.0 + n * step})
+        assert b.goal_speed == 2.0 + n * step
 
 
 def test_a_goal_never_reaches_zero():
@@ -72,13 +84,20 @@ def test_max_speed_still_bounds_a_goal():
     assert b.goal_speed == 6.0
 
 
-def test_the_cap_only_compounds_once_the_belt_has_caught_up():
-    # A repeating key cannot stack: until the belt actually moves, every extra
-    # press resolves to the same capped number.
+def test_a_repeating_key_can_now_walk_the_goal_to_the_ceiling():
+    # ⚠ This is the hazard the removed lead bound used to hold off, pinned here
+    # deliberately rather than left to be discovered later. Before 2026-08-28
+    # twenty presses resolved to 3.0 and could not compound until the belt had
+    # caught up; now they reach the pad's ceiling.
+    #
+    # It is recorded as a test, not a regression: the decision that day was that
+    # the "+0.5" label's promise outranks the bound. What still holds the belt is
+    # clamp_speed() -- every write is one step from the ACTUAL speed, so the belt
+    # cannot jump even with the intention sitting at 6.0.
     b, _ = make_bridge(speed=2.0)
     for _ in range(20):
         b.handle_command({"cmd": "goal", "kmh": 6.0})
-    assert b.goal_speed == 3.0
+    assert b.goal_speed == 6.0
 
 
 # -- 2. a goal writes nothing by itself -------------------------------------
@@ -116,7 +135,6 @@ def test_the_belt_is_walked_toward_the_goal_one_step_per_frame():
 
 def test_no_single_write_ever_exceeds_one_step():
     b, t = make_bridge(speed=2.0)
-    b.safety.max_goal_lead = 4.0          # deliberately loosen the OTHER bound
     b.handle_command({"cmd": "goal", "kmh": 6.0})
     feed(b, running_at(2.0))
     assert t.writes == [frames.set_speed(2.5)]
@@ -291,8 +309,26 @@ def test_an_absolute_goal_is_still_refused_while_the_belt_is_not_running():
     assert t.writes == []
 
 
-def test_the_stepping_path_keeps_its_lead_bound():
-    # Regression guard: the flag must be what opts out, never the default.
+def test_both_goal_paths_bound_identically_now():
+    # The `absolute` flag used to be the only way past the lead bound. With that
+    # bound gone the two paths agree, and the flag survives only because
+    # collapsing them is a separate change. If they ever diverge again, the
+    # stepping path is the one that must not be the tighter of the two.
+    stepped, _ = make_bridge(speed=2.0)
+    stepped.handle_command({"cmd": "goal", "kmh": 6.0})
+    absolute, _ = make_bridge(speed=2.0)
+    absolute.handle_command({"cmd": "goal", "kmh": 6.0, "absolute": True})
+    assert stepped.goal_speed == absolute.goal_speed == 6.0
+
+
+def test_a_goal_is_not_declared_reached_while_a_step_is_still_missing():
+    # Measured 2026-08-28: with the tolerance at half a step (0.25), a goal of
+    # 3.0 was declared reached and discarded with the belt at 2.8, so the user's
+    # third press vanished. The pad reports speed to 0.1; arrival means arrival.
     b, _ = make_bridge(speed=2.0)
-    b.handle_command({"cmd": "goal", "kmh": 6.0})
-    assert b.goal_speed == 2.0 + MAX_GOAL_LEAD_KMH
+    b.handle_command({"cmd": "goal", "kmh": 3.0})
+    feed(b, running_at(2.5))
+    feed(b, running_at(2.8))
+    assert b.goal_speed == 3.0
+    feed(b, running_at(3.0))
+    assert b.goal_speed is None

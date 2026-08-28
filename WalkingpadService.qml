@@ -18,10 +18,9 @@ Item {
   property real maxSpeed: 6.0
   property real speedStep: 0.5
   property real startSpeed: 2.0
-  // Mirrors Safety.MAX_GOAL_LEAD_KMH / MIN_GOAL_KMH so the number on screen is
-  // the number the bridge will accept. The bridge clamps again regardless --
-  // these exist so the UI never shows a goal that is quietly going to be cut.
-  property real maxGoalLead: 1.0
+  // Mirrors Safety.MIN_GOAL_KMH so the number on screen is the number the
+  // bridge will accept. The bridge clamps again regardless -- this exists so
+  // the UI never shows a goal that is quietly going to be cut.
   property real minGoal: 0.5
 
   readonly property string linkState: state.linkState
@@ -161,18 +160,15 @@ Item {
   // exactly one copy of the arithmetic: clampGoal() reads these, and the bridge
   // clamps again regardless -- these bound what the UI ASKS for, never what the
   // pad is allowed to receive (spec D-5).
-  // Rounded to a tenth like every other speed here. Binary floating point makes
-  // 2.8 - 1.0 come out as 1.7999999999999998, which is harmless in the clamp
-  // below but reaches the panel as a published number it would have to round
-  // again at every call site.
-  readonly property real goalBase: state.hasStatus ? state.currentSpeed : 0
-  readonly property real goalHigh: Math.round(
-    Math.min(root.maxSpeed, root.goalBase + root.maxGoalLead) * 10) / 10
-  // A belt already slower than minGoal must not be dragged up to it, so the
-  // floor can never cross above the ceiling.
-  readonly property real goalLow: Math.round(
-    Math.min(root.goalHigh,
-             Math.max(root.minGoal, root.goalBase - root.maxGoalLead)) * 10) / 10
+  //
+  // ⚠ Fixed since 2026-08-28. These used to follow the belt, holding the goal
+  // within maxGoalLead of the ACTUAL speed. That bound was removed because it
+  // silently ate presses the "+0.5" label had already promised -- three presses
+  // from 2.0 km/h reached 3.0, not 3.5. Read Safety.clamp_goal() for what the
+  // removal gives up. The rounding that used to live here went with it: there
+  // is no longer any arithmetic to produce 1.7999999999999998.
+  readonly property real goalHigh: root.maxSpeed
+  readonly property real goalLow: root.minGoal
 
   function clampGoal(kmh) {
     var value = Math.max(root.goalLow, Math.min(root.goalHigh, Number(kmh)))
@@ -207,9 +203,16 @@ Item {
   // standing intention rather than queueing a second action, which is the whole
   // point of a goal: the buttons stay live while the belt is still catching up.
   function speedBy(delta) {
-    var base = root.goalSpeed !== null
-      ? Number(root.goalSpeed)
-      : (state.hasStatus ? state.currentSpeed : 0)
+    // Spec §5.2: the label says "+0.5", so N presses must mean N * 0.5. The
+    // pending goal comes first because it is the only one of these that is
+    // already up to date: goalSpeed arrives from the bridge a round trip later,
+    // so two presses inside the 250 ms debounce would otherwise both step from
+    // the same stale number and the second would be lost.
+    var base = state.pendingGoal !== null
+      ? Number(state.pendingGoal)
+      : (root.goalSpeed !== null
+          ? Number(root.goalSpeed)
+          : (state.hasStatus ? state.currentSpeed : 0))
     setGoal(base + delta)
   }
 

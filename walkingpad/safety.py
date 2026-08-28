@@ -26,21 +26,16 @@ PAD_START_SPEED_KMH = 3.5
 # is a toggle, so normal use must not wander into probing it by accident.
 MIN_GOAL_KMH = 0.5
 
-# How far a goal may sit from the ACTUAL belt speed. See clamp_goal().
-MAX_GOAL_LEAD_KMH = 1.0
-
 
 class Safety:
     def __init__(self, max_speed: float = 6.0, max_step: float = 0.5,
                  stale_after_s: float = 3.0,
                  pad_start_speed: float = PAD_START_SPEED_KMH,
-                 max_goal_lead: float = MAX_GOAL_LEAD_KMH,
                  min_goal: float = MIN_GOAL_KMH):
         self.max_speed = max_speed
         self.max_step = max_step
         self.stale_after_s = stale_after_s
         self.pad_start_speed = pad_start_speed
-        self.max_goal_lead = max_goal_lead
         self.min_goal = min_goal
 
     def clamp_speed(self, current: float, requested: float) -> float:
@@ -71,43 +66,45 @@ class Safety:
         return round(max(value, 0.0), 1)
 
     def clamp_goal(self, current: float, requested: float) -> float:
-        """Bound a live goal against the ACTUAL belt speed.
+        """Bound a goal to the pad's own range, and nothing tighter.
 
         A goal is not a command. It is a standing intention the bridge walks the
         belt toward, one clamp_speed() step per status frame, so the belt still
         never changes by more than max_step at a time and max_speed is still the
-        ceiling. What this adds is a bound on how far ahead of reality the
-        intention may run.
+        ceiling. Those are the bounds that matter with someone standing on the
+        belt, and nothing here touches them.
 
-        That bound is the point. The per-action clamp was written for "the worst
-        case of a stuck key or a double click is one small increment", and a goal
-        with no lead limit gives that back: a key that repeats walks the goal to
-        the ceiling and the belt follows it there. Capping the lead means the
-        worst an unattended input can do at any instant is max_goal_lead, and it
-        cannot compound until the belt has actually caught up -- which takes real
-        seconds at ~0.25 km/h/s, in front of someone who can see it happening.
+        ⚠ This ALSO used to cap how far ahead of the ACTUAL speed the intention
+        could sit -- max_goal_lead, 1.0 km/h. REMOVED by decision on 2026-08-28,
+        because that bound broke a promise the UI makes out loud: the button is
+        labelled "+0.5", so three presses must mean +1.5. Measured on hardware
+        that day, three presses from 2.0 km/h produced a goal of 3.0 and a belt
+        that settled at 2.8 -- the cap ate the third press and the arrival
+        tolerance in bridge.py ate the remainder. A control that does not do what
+        its own label says is its own kind of hazard.
 
-        Symmetric on purpose. Slowing down is the safer direction, but a goal
-        that can drop arbitrarily far still asks for a deceleration nobody
-        braced for, and symmetry is easier to predict than a special case.
+        What that gives up, stated plainly so nobody reinstates the cap as a bug
+        fix: a key that repeats now walks the goal to max_speed and the servo
+        follows it there, one step per frame, with nobody pressing anything. The
+        old bound held the worst instantaneous case to 1.0 km/h. What remains is
+        the per-write clamp_speed() step, the "belt must be running" gate and the
+        staleness gate, all in _service_goal().
+
+        `current` is no longer read. The signature is kept because bridge.py
+        still routes the stepped and absolute paths separately; collapsing the
+        two is a follow-up, not this change.
         """
-        low = max(self.min_goal, current - self.max_goal_lead)
-        high = min(self.max_speed, current + self.max_goal_lead)
-        # A belt already slower than min_goal must not be dragged up to it.
-        low = min(low, high)
-        value = min(max(requested, low), high)
+        value = min(max(requested, self.min_goal), self.max_speed)
         return round(value, 1)
 
     def clamp_goal_absolute(self, requested: float) -> float:
         """Bound an EXPLICIT goal to the pad's own range, and nothing tighter.
 
-        Deliberately without clamp_goal()'s max_goal_lead bound. Read that
-        docstring first: the lead bound is aimed squarely at the REPEATING path
-        -- a key that repeats, a double click -- where each press is worth one
-        increment and nobody has stated a destination. An absolute value that a
-        person typed and committed is the opposite of that. It is one
-        deliberate act naming where they want to end up, and refusing it
-        because the belt has not got there yet just makes them type it again.
+        ⚠ As of 2026-08-28 this is identical to clamp_goal(), which lost its
+        max_goal_lead bound the same day. It is kept as a separate name because
+        bridge.py still distinguishes the two paths through the `absolute` flag;
+        collapsing them is a flagged follow-up. Until then, read clamp_goal()'s
+        docstring for why the lead bound went.
 
         What this does NOT relax:
           - max_speed is still the ceiling.
