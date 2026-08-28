@@ -53,8 +53,13 @@ once per plugin id, and each widget retrieves it through
 `bar?.shell?.serviceFor(<id>)`.
 
 QML `pragma Singleton` is not this mechanism. The distinction matters here: the
-bar creates a widget per screen, while the pad has only one BLE connection slot.
-Putting ownership in the widget can create several competing bridges.
+bar creates a widget per screen, while the pad has one BLE link. Putting
+ownership in the widget creates one bridge per screen.
+
+⚠ They do not compete, and nothing errors. BlueZ owns the link and shares it
+between local clients (measured 2026-08-27), so every extra bridge simply adds
+its own poll cadence to the same pad. The failure is silent, which is why the
+service kind is the mechanism rather than a nicety.
 
 ## Theme contract
 

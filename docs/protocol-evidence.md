@@ -19,9 +19,14 @@
 
 ## Constraints
 - ONE BLE connection at a time → phone app and helper are mutually exclusive.
+  ⚠ Amended 2026-08-27: that holds for a client on another machine. BlueZ owns
+  the link and SHARES it between local clients — see "Two bridges do not fail"
+  below.
 - BarPanel is instantiated **once per screen** (3 here) → helper MUST be owned by a
   manifest `service` kind and looked up through `bar?.shell?.serviceFor(<id>)`,
-  never by the widget. Otherwise 3 helpers, 1 slot.
+  never by the widget. ⚠ Not "otherwise 3 helpers, 1 slot", which is what this
+  line said and is wrong: 3 helpers would all connect and all poll, tripling the
+  poll rate the pad sees with no error anywhere.
 - Marketplace disqualifiers (own vetting rule): binaries, sudoers/polkit, daemons.
   → source-only Python, child process of the shell, no systemd unit, no root.
 - Plugin manifest v1: id/name/version/author/description/kinds/entryPoints,

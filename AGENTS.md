@@ -42,8 +42,17 @@ already caused, or nearly caused, a wrong design decision.
    which is indistinguishable from a contention failure. This produced a confidently
    wrong conclusion once already. Use `BleakScanner.find_device_by_filter`.
 
-5. **Only ONE BLE connection at a time.** The phone app and this plugin are mutually
-   exclusive. "In use by another device" is a state to surface, not a fault to fix.
+5. **One BLE connection at a time — and BlueZ owns it.** The phone app and this
+   plugin are mutually exclusive: a client on another machine is refused, and
+   "in use by another device" is a state to surface, not a fault to fix.
+   ⚠ **A second client on THIS host is not refused.** Measured 2026-08-27: two
+   local D-Bus clients share the one link, both poll it, and BlueZ broadcasts
+   every notification to both. So two bridges do not fail loudly — they double
+   the poll rate the pad sees and interleave two cadences into what looks like
+   duplication. That is why the service singleton matters, and it is a stronger
+   reason than "the second one would be refused", which is what this fact used
+   to say. `docs/protocol-evidence.md`, "Two bridges do not fail. They silently
+   share the link."
 
 6. **`belt == 1` means running**, not "starting". An earlier guess said otherwise;
    the advancing step counter disproved it.

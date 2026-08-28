@@ -17,8 +17,14 @@ Panel {
   // The bar injects only bar/moduleName/settings into a bar-widget; the
   // service auto-injection in shell.qml applies to panel/overlay/menu kinds.
   // So the singleton is looked up by id, which is also what keeps ONE bridge
-  // across however many monitors the bar is drawn on (fact 5: the pad accepts
-  // exactly one BLE connection).
+  // across however many monitors the bar is drawn on.
+  //
+  // ⚠ Not because a second one would be refused. Fact 5, measured 2026-08-27:
+  // BlueZ owns the pad's one link and SHARES it between local clients, so three
+  // widgets each owning a bridge would give three clients all polling the same
+  // link -- triple the poll rate the pad sees, and no error anywhere to say so.
+  // The old comment here said the pad "accepts exactly one BLE connection",
+  // which invites deleting this lookup once someone learns otherwise.
   //
   // Written the long way on purpose. `bar?.shell?.serviceFor(...)` reads better
   // but makes Qt 6.11's qmllint AND qmlformat abort with exit 255 and no

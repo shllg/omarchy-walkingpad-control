@@ -206,9 +206,13 @@ class Transport:
         """Connect and wait for GATT to resolve.
 
         Raises GLib.Error on refusal. "in use by another device" arrives here:
-        only ONE BLE connection to the pad exists at a time, so the phone app
-        and this bridge are mutually exclusive. That is a state to report, not
-        a fault to retry (spec §8).
+        the pad has one BLE connection and a client on ANOTHER machine holds it,
+        so the phone app and this bridge are mutually exclusive. That is a state
+        to report, not a fault to retry (spec §8).
+
+        ⚠ A second client on this host does not arrive here at all. BlueZ owns
+        the link and shares it between its own clients (fact 5), so two bridges
+        connect successfully and both poll the same pad.
         """
         self._call(device.path, DEVICE_IFACE, "Connect",
                    timeout_ms=CONNECT_TIMEOUT_MS)

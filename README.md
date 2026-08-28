@@ -195,7 +195,10 @@ a permanently frozen UI that looks like an idle pad rather than a bug.
 
 **Only one connection at a time.** The phone app and this plugin are mutually
 exclusive. Being unable to connect while the app is attached is a state to
-surface, not a fault to retry into.
+surface, not a fault to retry into. On your own machine the picture is
+different: BlueZ owns that one link and shares it between local clients, so a
+second copy of the bridge does not fail — it quietly doubles how often the pad
+is polled.
 
 ## Safety
 

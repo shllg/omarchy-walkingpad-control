@@ -100,8 +100,16 @@ Three components, one process tree, no systemd unit, no root, no compiled binary
 ### 3.1 Why the singleton is mandatory, not stylistic
 
 `BarPanel` is instantiated **once per screen**. The author's machine has three.
-If the widget spawned the bridge, three bridges would contend for the pad's
-**single** BLE connection slot. The manifest therefore declares the `service`
+If the widget spawned the bridge, there would be three bridges.
+
+⚠ **They would not contend, and that is the point.** This paragraph used to say
+they would compete for the pad's single connection slot; measured 2026-08-27,
+BlueZ owns that link and shares it between local clients, so all three would
+connect and all three would poll — tripling the rate the pad sees, with no error
+anywhere to say so (fact 5). A failure that announces itself is the easy case;
+this one does not, which makes the singleton mandatory rather than tidy.
+
+The manifest therefore declares the `service`
 kind through `kinds: ["service", "bar-widget"]`; for every enabled service-kind
 plugin, the shell's service loader creates exactly one service object per plugin
 id. The manifest also sets `keepLoaded: true`, matching the first-party precedent,
@@ -241,8 +249,11 @@ walkingpad-bridge --replay fixtures/c2-fw6.1.2.jsonl    # no hardware needed
 ```
 `--replay` feeds captured frames so the QML layer and CI can run pad-free.
 
-`--once` is deliberately not provided. A one-shot process would contend with the
-long-running bridge for the pad's single BLE connection slot. It would also have
+`--once` is deliberately not provided. A one-shot process would not be refused
+by the long-running bridge — BlueZ shares the link between local clients (fact
+5) — so it would silently add a second poll cadence to the same pad, and
+contention is not free: one `answered_s` measured 23.08 s with a second bridge
+polling, against 28-29 s otherwise. It would also have
 to scan before connecting, which is slow and often finds nothing because the pad
 normally sleeps and stops advertising entirely. One-off external commands instead
 use §5.1's `IpcHandler` (target `walkingpad`), which exposes `speedUp`, `speedDown`,
@@ -732,7 +743,7 @@ The intended optional values remain:
 |---|---|
 | Pad not in range | `linkState = absent`, dormant glyph, no retry storm (30 s backoff) |
 | Connection lost mid-walk | notify, retry 3× with backoff, keep last known stats visible but greyed |
-| Slot held by phone app | surface "in use by another device" — this is the single-connection limit, not a fault |
+| Slot held by phone app | surface "in use by another device" — this is the single-connection limit, not a fault. ⚠ Only a client on another machine lands here; BlueZ shares the link between local clients (fact 5) |
 | Bridge crashes | service restarts it, max 3× per minute, then reports a hard error |
 | CRC mismatch | drop the frame, count it; >10 consecutive → treat as link failure |
 

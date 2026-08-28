@@ -542,9 +542,10 @@ class Bridge:
                 self.transport.connect(device)
                 self.transport.subscribe(self.on_notify)
             except Exception as exc:
-                # Only ONE BLE connection to the pad exists at a time, so the
-                # phone app being attached lands here. Spec §8: surface it as a
-                # state, do not retry into it.
+                # The pad has one BLE connection and the phone app holding it
+                # lands here. Spec §8: surface it as a state, do not retry into
+                # it. A second bridge on this host would NOT land here -- BlueZ
+                # shares its link between local clients (fact 5).
                 self.emit({"t": "link", "state": "unavailable", "msg": str(exc)})
                 self.transport.disconnect()
                 return RESCAN_BACKOFF_S

@@ -29,7 +29,11 @@ now refuses motion commands in that state and says so:
 
     {"t":"error","code":"standby","msg":"pad is in standby and ignores commands; …"}
 
-Only one BLE connection to the pad exists at a time, so close the phone app first.
+Only one BLE connection to the pad exists at a time, so close the phone app
+first. ⚠ That exclusivity does NOT extend to this machine: BlueZ owns the link
+and shares it between local clients, so the plugin's own bridge and a bridge you
+start by hand both connect and both poll. Disable the plugin rather than
+assuming one of them wins — see §4b.
 
 ## 2. Read-only checks
 
@@ -167,9 +171,17 @@ shell, so stdout is visible:
 ```
 
 ⚠ **Disable the plugin first** (`omarchy plugin disable io.github.shllg.walkingpad`)
-so the shell's own bridge releases the link — only one BLE connection to the pad
-exists at a time (fact 5). Re-enable it afterwards; `disable` removes the bar
-placement, so back up `~/.config/omarchy/shell.json` before and restore it after.
+so the shell's own bridge stops. Re-enable it afterwards; `disable` removes the
+bar placement, so back up `~/.config/omarchy/shell.json` before and restore it
+after.
+
+⚠ **Disable it — do not kill the process.** Two bridges do not fail: BlueZ owns
+the pad's one link and shares it between local clients, so both connect, both
+poll, and frames arrive on two interleaved cadences that read as duplication
+(fact 5, measured 2026-08-27). Killing the plugin's bridge does not give you
+exclusivity either — quickshell respawned it in **3 s**, measured. Contention is
+not harmless to what you are measuring here: one `answered_s` came in at 23.08 s
+while a second bridge was also polling, against 28–29 s otherwise.
 
 ⚠⚠ **Gate: send the start inside the answered window.** This pad has been
 measured stopping its replies 29.2 s after a connection while still acknowledging
@@ -508,11 +520,16 @@ read-only status query `F7 A2 00 00 A2 FD`, previously confirmed safe when sent
 repeatedly with belt state and speed unchanged, and prints each full frame as
 hex, including bytes [15]–[17].
 
-23. Run `tools/probe-status.py` as a separate, standalone step. Only one BLE
-    connection to the pad exists at a time, so do not run it while
-    `./bin/walkingpad-bridge` is connected. Run it just before connecting the
-    bridge, or after stopping the bridge with Ctrl-C and confirming the
-    disconnection as in §3 step 10.
+23. Run `tools/probe-status.py` as a separate, standalone step, with **no other
+    BLE client attached to the pad**. ⚠ Corrected 2026-08-28: this step used to
+    say only "do not run it while `./bin/walkingpad-bridge` is connected", which
+    misses the bridge that matters. The installed plugin's bridge is spawned by
+    quickshell and runs permanently, and BlueZ shares the pad's one link between
+    local clients rather than refusing the second (fact 5) — so following the old
+    wording gave two clients, two interleaved poll cadences, and a raw capture
+    you could not trust. Disable the plugin as §4b describes, stop any manual
+    bridge with Ctrl-C, and confirm the disconnection as in §3 step 10 before
+    running the probe.
 24. Capture a raw frame in whatever states the rest of this session reaches
     naturally: for example, once while awake-and-idle or in standby, and again if
     the belt happens to be running from an earlier step or a panel start. Stand
