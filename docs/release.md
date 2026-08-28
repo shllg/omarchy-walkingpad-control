@@ -45,6 +45,24 @@ in deliberate releases rather than continuously.
    that changes motion control. Nothing else in this repository can substitute
    for that.
 
+   ⚠ **v1.0.6 shipped with §4c checks 4 and 6 unrun.** Waived deliberately by the
+   author on 2026-08-28, recorded here rather than left to be discovered from the
+   git history. What that means concretely:
+
+   - **`speedBy()`'s step-grid arithmetic ships unverified on hardware**
+     (`WalkingpadService.qml`, commit `1e0b471`). It is QML-side JavaScript, so
+     ADR D-1 puts it out of pytest's reach; check 4 is its only gate, and it was
+     verified by hand against a table of bases instead. The defect it fixes —
+     a goal of 3.1 off the step grid — was itself found by pressing a button,
+     not by a check.
+   - **The popup chart has never been seen against a moving belt** (check 6).
+   - Signed and unaffected: §4b (the two-part start), §4d (the live goal), and
+     §4c checks 1, 2, 3 and 5.
+
+   This is a precedent to use sparingly, not a new default. The gate above stands
+   for the next release, and running checks 4 and 6 is the first hardware work
+   queued after 1.0.6.
+
 ## Keeping the automatic `passed`
 
 The security baseline is deterministic and its scope is narrow, which makes the

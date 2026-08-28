@@ -529,7 +529,10 @@ of these against the bar icon and popup:
   normally. Match on `/proc/*/cmdline` beginning `/usr/bin/python3`.
 
   **Still unrun from this section:** checks 4 and 6, which both need a running
-  belt and are meant to ride in one session. Checks 1 and 2 keep their PASS from
+  belt and are meant to ride in one session. ⚠ **v1.0.6 shipped anyway**, with
+  the gate waived deliberately — `docs/release.md`, "Before tagging", says what
+  that leaves unverified. These two checks are the first hardware work queued
+  after it, and the gate stands again for the next release. Checks 1 and 2 keep their PASS from
   the first run — check 1's rewrite changed only its wording about dimming, and
   nothing since has touched `Model.instruction()`'s standby gate.
 
