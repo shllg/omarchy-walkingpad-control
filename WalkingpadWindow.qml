@@ -46,6 +46,10 @@ Item {
 
   readonly property string statsPath:
     root.urlToLocalPath(Qt.resolvedUrl("bin/walkingpad-stats"))
+  // Named in the integrity note below, because "something is wrong" without the
+  // command that fixes it is a worse message than none.
+  readonly property string repairPath:
+    root.urlToLocalPath(Qt.resolvedUrl("bin/walkingpad-repair-gaps"))
   readonly property real manifestGapMinutes: {
     var barWidget = root.manifest && root.manifest.barWidget
     var defaults = barWidget && barWidget.defaults
@@ -73,6 +77,8 @@ Item {
 
   property var profile: root.emptyProfile()
   property string profileError: ""
+  // The standing audit's last answer, or null before it has run once.
+  property var verifyResult: null
   property var sessions: []
   property string sessionsError: ""
 
@@ -265,6 +271,23 @@ Item {
       + "not measured — exact in these totals, absent from the charts"
   }
 
+  // The one thing the totals above cannot say: whether they are complete.
+  //
+  // Between 2026-08-27 and 2026-09-08 this window reported every day as fact
+  // while roughly 40% of each walk was missing from it, and nothing on screen
+  // could have told anyone. `walkingpad-stats verify` holds the stored bouts
+  // against the raw counters in samples/, and this is where it says so.
+  readonly property string integrityNote: {
+    if (root.verifyResult === null) return ""
+    var missing = root.numeric(root.verifyResult.missing_steps)
+    if (!(missing > 0)) return ""
+    var days = root.numeric(root.verifyResult.days_mismatched)
+    return "⚠ " + root.formatSteps(missing) + " steps the pad counted are "
+      + "missing from history on " + days + (days === 1 ? " day" : " days")
+      + ". They are still in the stored counters — recover them with "
+      + root.repairPath + " --apply"
+  }
+
   readonly property real periodBucketSeconds:
     root.finiteNumber(root.profile.bucket_s) && root.profile.bucket_s > 0
       ? root.profile.bucket_s : 60
@@ -385,6 +408,15 @@ Item {
     profileProc.running = true
   }
 
+  function refreshVerify() {
+    if (!root.opened) return
+    // No queueing and no period arguments: it audits the whole store, so one
+    // in flight is always still the answer to the question being asked.
+    if (verifyProc.running) return
+    verifyProc.requestEpoch = root.refreshEpoch
+    verifyProc.running = true
+  }
+
   function refreshSessionDetail() {
     if (!root.opened || root.selectedSessionStart === null) return
     if (sessionProc.running) {
@@ -446,6 +478,15 @@ Item {
     root.profile = payload
   }
 
+  function handleVerify(text, requestEpoch) {
+    if (requestEpoch !== root.refreshEpoch) return
+    var result = root.parseStatsOutput(text, "")
+    // Silent on failure by design. The audit is a background reassurance, not
+    // something the user asked for, so a broken one must not push an error in
+    // front of totals that are themselves fine.
+    root.verifyResult = result.ok ? result.value : null
+  }
+
   function handleSessionDetail(text, requestStart, requestGap, requestEpoch) {
     if (requestEpoch !== root.refreshEpoch
         || requestGap !== root.gapMinutes
@@ -497,6 +538,7 @@ Item {
     root.sessionsError = ""
     root.refreshProfile()
     root.refreshSessions()
+    root.refreshVerify()
   }
 
   function selectSession(session) {
@@ -532,6 +574,10 @@ Item {
     root.opened = true
     root.refreshProfile()
     root.refreshSessions()
+    // The audit runs whenever the window is looked at, which is the only place
+    // it could ever be seen. It reads the whole store, so it is far too heavy
+    // for the poll loop and exactly right here.
+    root.refreshVerify()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -610,6 +656,16 @@ Item {
           || requestEpoch !== root.refreshEpoch) {
         Qt.callLater(function() { root.refreshProfile() })
       }
+    }
+  }
+
+  Process {
+    id: verifyProc
+    property int requestEpoch: 0
+    command: [root.statsPath, "verify"]
+    stdout: StdioCollector { id: verifyOut; waitForEnd: true }
+    onExited: function() {
+      root.handleVerify(verifyOut.text, requestEpoch)
     }
   }
 
@@ -999,6 +1055,11 @@ Item {
             SectionNote {
               visible: !root.sessionMode && root.profileError !== ""
               text: root.profileError
+            }
+
+            SectionNote {
+              visible: root.integrityNote !== ""
+              text: root.integrityNote
             }
 
             // ---------- Period mode ----------

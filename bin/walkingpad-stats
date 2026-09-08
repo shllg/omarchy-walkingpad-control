@@ -183,6 +183,11 @@ def build_parser():
 
     residuals = commands.add_parser("residuals", add_help=False)
     residuals.add_argument("--store", default=default_store_dir())
+
+    # Deliberately takes no --since/--until. Its job is "is anything on disk
+    # wrong", and a window is the one thing that could hide the answer.
+    verify = commands.add_parser("verify", add_help=False)
+    verify.add_argument("--store", default=default_store_dir())
     return parser
 
 
@@ -881,6 +886,93 @@ def query_links(args):
     }
 
 
+def local_day(timestamp):
+    # The same key bucket_key() gives a bout, so a day compares against itself.
+    return datetime.fromtimestamp(timestamp).date().isoformat()
+
+
+def query_verify(args):
+    """Hold the bouts on disk against the raw counters in samples/.
+
+    The store's live self-check (residual = last_pad - attributed) can only see
+    the epoch it is in, and every pad reset clears it -- which is exactly how a
+    40% loss survived twelve days without one visible symptom. This is the check
+    that does not forget. Design plan §2.2 keeps `d`, `s` and `pe` raw rather
+    than as deltas precisely "so a bug in today's attribution logic is repairable
+    tomorrow", and that same evidence is what makes it auditable today.
+
+    Compares steps and seconds only. Both are integers on both sides, so the
+    verdict is exact; distance would need a rounding tolerance and says nothing
+    the other two do not.
+
+    Read-only, deliberately. It never repairs -- bin/walkingpad-repair-gaps does
+    that, when a person asks. A detector that silently rewrites what it is
+    checking is worse than no detector.
+    """
+    bouts, skipped_bouts = read_bouts(args.store)
+    stored = {}
+    for bout in bouts:
+        entry = stored.setdefault(
+            bucket_key(bout, "day"), {"steps": 0, "dur_s": 0, "bouts": 0})
+        entry["steps"] += bout["steps"]
+        entry["dur_s"] += bout["dur_s"]
+        entry["bouts"] += 1
+
+    counted = {}
+    skipped_samples = 0
+    previous = None
+    for path in sample_files_in_range(args.store, None, None):
+        rows, skipped = read_jsonl(path, validate_sample)
+        skipped_samples += skipped
+        for sample in sorted(rows, key=lambda row: row["t"]):
+            # Carried across files on purpose: a lost link can straddle midnight
+            # and its delta belongs to the day the link went quiet.
+            if previous is not None and previous["e"] == sample["e"]:
+                steps = sample["s"] - previous["s"]
+                elapsed = sample["pe"] - previous["pe"]
+                # A counter going backwards is a reset the store re-baselined
+                # on. There is no delta across one to hold anybody to.
+                if steps >= 0 and elapsed >= 0:
+                    entry = counted.setdefault(
+                        local_day(previous["t"]), {"steps": 0, "dur_s": 0})
+                    entry["steps"] += steps
+                    entry["dur_s"] += elapsed
+            previous = sample
+
+    days = []
+    for key in sorted(set(stored) | set(counted)):
+        have = stored.get(key, {"steps": 0, "dur_s": 0, "bouts": 0})
+        pad = counted.get(key)
+        days.append({
+            "key": key,
+            # A day whose samples have been removed cannot be checked. Saying so
+            # is the honest answer; calling it clean would not be.
+            "checked": pad is not None,
+            "bouts": have["bouts"],
+            "bout_steps": have["steps"],
+            "bout_dur_s": have["dur_s"],
+            "pad_steps": None if pad is None else pad["steps"],
+            "pad_dur_s": None if pad is None else pad["dur_s"],
+            # Positive means history is SHORT of what the pad counted, which is
+            # the direction bin/walkingpad-repair-gaps exists to close.
+            "missing_steps": None if pad is None else pad["steps"] - have["steps"],
+            "missing_dur_s": None if pad is None else pad["dur_s"] - have["dur_s"],
+        })
+
+    mismatched = [day for day in days if day["checked"]
+                  and (day["missing_steps"] or day["missing_dur_s"])]
+    return {
+        "ok": not mismatched,
+        "days_checked": sum(1 for day in days if day["checked"]),
+        "days_unchecked": sum(1 for day in days if not day["checked"]),
+        "days_mismatched": len(mismatched),
+        "missing_steps": sum(max(0, day["missing_steps"]) for day in mismatched),
+        "missing_dur_s": sum(max(0, day["missing_dur_s"]) for day in mismatched),
+        "days": days,
+        "skipped_rows": skipped_bouts + skipped_samples,
+    }
+
+
 def dispatch(args):
     if args.command == "sessions":
         return query_sessions(args)
@@ -892,6 +984,8 @@ def dispatch(args):
         return query_profile(args)
     if args.command == "links":
         return query_links(args)
+    if args.command == "verify":
+        return query_verify(args)
     return query_residuals(args)
 
 

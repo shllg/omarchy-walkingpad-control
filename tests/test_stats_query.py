@@ -1205,3 +1205,76 @@ def test_links_rejects_a_top_of_zero(tmp_path):
     payload = result_json(run_stats(tmp_path, "links", "--top", "0"),
                           expected_code=1)
     assert "error" in payload
+
+
+def test_verify_passes_a_store_whose_bouts_account_for_every_counter(tmp_path):
+    day = epoch(2026, 9, 8, 10)
+    for offset, steps in ((0, 10), (1, 11), (2, 12)):
+        write_sample(tmp_path, "2026-09-08", t=day + offset,
+                     s=steps, pe=10 + offset, d=0.10)
+    write_observed_bout(tmp_path, start=day, end=day + 2,
+                        dur_s=2, dist_km=0.0, steps=2)
+
+    payload = result_json(run_stats(tmp_path, "verify"))
+
+    assert payload["ok"] is True
+    assert payload["days_mismatched"] == 0
+    assert payload["missing_steps"] == 0
+    assert payload["days"][0]["pad_steps"] == payload["days"][0]["bout_steps"]
+
+
+def test_verify_names_the_day_and_the_amount_that_went_missing(tmp_path):
+    # The 2026-09-08 shape: frames, a hole the pad walked through, more frames,
+    # and no bout for the hole. This is the check that would have caught it.
+    day = epoch(2026, 9, 8, 10)
+    write_sample(tmp_path, "2026-09-08", t=day, s=10, pe=10)
+    write_sample(tmp_path, "2026-09-08", t=day + 1, s=11, pe=11)
+    write_sample(tmp_path, "2026-09-08", t=day + 21, s=38, pe=31)
+    write_observed_bout(tmp_path, start=day, end=day + 1,
+                        dur_s=1, dist_km=0.0, steps=1)
+
+    payload = result_json(run_stats(tmp_path, "verify"))
+
+    assert payload["ok"] is False
+    assert payload["days_mismatched"] == 1
+    assert payload["missing_steps"] == 27
+    assert payload["missing_dur_s"] == 20
+    assert payload["days"][0]["key"] == "2026-09-08"
+    assert payload["days"][0]["checked"] is True
+
+
+def test_verify_reports_a_day_it_cannot_check_rather_than_passing_it(tmp_path):
+    # Bouts with no samples behind them cannot be audited. Counting that as a
+    # clean day would be the detector lying about its own coverage.
+    day = epoch(2026, 9, 8, 10)
+    write_observed_bout(tmp_path, start=day, end=day + 60,
+                        dur_s=60, dist_km=0.05, steps=78)
+
+    payload = result_json(run_stats(tmp_path, "verify"))
+
+    assert payload["days_unchecked"] == 1
+    assert payload["days_checked"] == 0
+    assert payload["days"][0]["checked"] is False
+    assert payload["days"][0]["pad_steps"] is None
+    # `ok` means "no mismatch was found", which is not the same claim as "every
+    # day was checked". A caller that cares about coverage reads days_unchecked.
+    assert payload["ok"] is True
+
+
+def test_verify_does_not_hold_an_epoch_reset_against_the_store(tmp_path):
+    # Counters restarting is the pad sleeping, not walking going missing. A
+    # delta across that boundary would join two unrelated coordinate systems.
+    day = epoch(2026, 9, 8, 10)
+    write_sample(tmp_path, "2026-09-08", t=day, e=1, s=100, pe=100)
+    write_sample(tmp_path, "2026-09-08", t=day + 1, e=1, s=101, pe=101)
+    write_sample(tmp_path, "2026-09-08", t=day + 2, e=2, s=0, pe=0)
+    write_sample(tmp_path, "2026-09-08", t=day + 3, e=2, s=2, pe=2)
+    write_observed_bout(tmp_path, start=day, end=day + 1,
+                        dur_s=1, dist_km=0.0, steps=1, e=1)
+    write_observed_bout(tmp_path, start=day + 2, end=day + 3,
+                        dur_s=2, dist_km=0.0, steps=2, e=2)
+
+    payload = result_json(run_stats(tmp_path, "verify"))
+
+    assert payload["ok"] is True
+    assert payload["missing_steps"] == 0

@@ -414,7 +414,8 @@ def test_a_whole_walk_of_mute_cycles_loses_nothing(tmp_path):
     reaches a bout, and the ones nobody watched say so.
     """
     clock = FakeClock()
-    store = Store(tmp_path, now=clock)
+    emitted = []
+    store = Store(tmp_path, emit=emitted.append, now=clock)
     pad = {"elapsed_s": 0.0, "dist_km": 0.0, "steps": 0.0}
 
     def frame(belt="running"):
@@ -450,6 +451,62 @@ def test_a_whole_walk_of_mute_cycles_loses_nothing(tmp_path):
     assert store.attributed == store.last_pad
     assert sum(bout["steps"] for bout in bouts) == store.last_pad["steps"]
     assert sum(bout["dur_s"] for bout in bouts) == store.last_pad["elapsed_s"]
+    # And the alarm stays quiet: this is the shape it must NOT cry wolf on.
+    assert [e for e in emitted if e.get("code") == "attribution_gap"] == []
+
+
+def test_walking_that_reaches_no_bout_is_announced_once_per_epoch(tmp_path):
+    """The alarm that was missing for twelve days.
+
+    The residual is recomputed on every frame and was read by nobody, so a store
+    losing 40% of every walk looked exactly like a healthy one from the panel.
+    """
+    clock = FakeClock()
+    emitted = []
+    store = Store(tmp_path, emit=emitted.append, now=clock)
+    store.record(
+        make_status(belt="running", speed_kmh=2.5,
+                    elapsed_s=10, distance_km=0.01, steps=13),
+        None,
+        None,
+    )
+    # A wall clock that jumped backwards re-baselines without attributing, which
+    # is one of the few paths that can still leave real walking unplaced.
+    clock.wall -= 60
+    store.record(
+        make_status(belt="running", speed_kmh=2.5,
+                    elapsed_s=100, distance_km=0.07, steps=130),
+        None,
+        None,
+    )
+
+    alarms = [e for e in emitted if e.get("code") == "attribution_gap"]
+    assert len(alarms) == 1
+    # Named amounts, not "something is wrong": the numbers are the evidence.
+    assert "90 s" in alarms[0]["msg"]
+    assert "117 steps" in alarms[0]["msg"]
+
+    # Once per epoch, so a persistent fault does not fill the panel.
+    clock.advance(1)
+    store.record(
+        make_status(belt="running", speed_kmh=2.5,
+                    elapsed_s=101, distance_km=0.07, steps=131),
+        None,
+        None,
+    )
+    assert len([e for e in emitted if e.get("code") == "attribution_gap"]) == 1
+
+    # A reset re-arms it: the next epoch is a fresh claim about a fresh walk.
+    clock.advance(1)
+    store.record(make_status(belt="running", speed_kmh=2.5), None, None)
+    clock.wall -= 60
+    store.record(
+        make_status(belt="running", speed_kmh=2.5,
+                    elapsed_s=90, distance_km=0.06, steps=117),
+        None,
+        None,
+    )
+    assert len([e for e in emitted if e.get("code") == "attribution_gap"]) == 2
 
 
 def test_first_frame_adopts_high_counters_without_a_residual(tmp_path):

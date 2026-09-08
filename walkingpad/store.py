@@ -43,6 +43,17 @@ MIN_RESIDUAL_ELAPSED_S = 2
 MIN_RESIDUAL_DIST_KM = 0.02
 STATE_WRITE_INTERVAL_S = 10.0
 
+# When to say out loud that walking is going missing.
+#
+# `residual = last_pad - attributed` is the design's own self-check (plan §1.2),
+# recomputed on every frame and, until 2026-09-08, read by nobody: the only way
+# to see it was to run the query tool by hand. It sat at roughly 40% of every
+# walk for twelve days while the panel showed nothing at all. A healthy walk now
+# closes it at zero and the floors above leak at most a step per hole, so a whole
+# minute of pad-counted walking that reached no bout is unambiguous rather than
+# borderline -- and it is the pad's own elapsed_s, not an inference from ours.
+RESIDUAL_ALARM_ELAPSED_S = 60
+
 # store.py has no BLE knowledge (design §3.1), and record() sees only freshly
 # decoded frames, never a "link reconnected" event. While attached, the bridge
 # polls every 1-2 s; a larger wall-clock gap therefore means the link disappeared
@@ -113,6 +124,9 @@ class Store:
         self.last_seen_wall = None
 
         self._was_active = False
+        # One alarm per epoch, so a persistent fault says so again after each
+        # pad sleep rather than once for the life of the store.
+        self._residual_alarmed = False
         self._tail_deadline = None
         self._last_state_write = None
 
@@ -296,6 +310,7 @@ class Store:
                     "dist_km": 0.0,
                     "steps": 0,
                 }
+                self._residual_alarmed = False
                 self.last_pad = dict(pad_now)
                 self.last_seen_wall = wall
                 if running:
@@ -420,6 +435,37 @@ class Store:
         # State is deliberately last: samples preserve the evidence needed to
         # rebuild attribution, and no filesystem work may precede motion service.
         self._write_state(wall, force=force_write)
+        self._check_residual()
+
+    def _check_residual(self):
+        """Announce, once per epoch, that the self-check has stopped closing.
+
+        Three integer comparisons on the two numbers record() already holds. It
+        cannot see a fault in an epoch that has already ended -- that is what
+        `walkingpad-stats verify` is for -- but it turns the failure this alarm
+        exists for from twelve silent days into about three minutes.
+        """
+        if self._residual_alarmed or self.last_pad is None:
+            return
+        missing_s = self.last_pad["elapsed_s"] - self.attributed["elapsed_s"]
+        if missing_s < RESIDUAL_ALARM_ELAPSED_S:
+            return
+        self._residual_alarmed = True
+        if self._emit is None:
+            return
+        missing_steps = self.last_pad["steps"] - self.attributed["steps"]
+        try:
+            self._emit({
+                "t": "error",
+                "code": "attribution_gap",
+                "msg": "%d s and %d steps the pad counted have reached no "
+                       "bout; history is under-reporting this walk"
+                       % (missing_s, missing_steps),
+            })
+        except Exception:
+            # Same rule as _fail: even a broken output path must not propagate
+            # into belt control.
+            pass
 
     def _new_bout(self, wall):
         return {
