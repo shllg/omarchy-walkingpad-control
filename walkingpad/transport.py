@@ -126,6 +126,10 @@ class Transport:
         self._notify_path = None
         self._signal_id = None
         self._callback = None
+        self._scanning = False
+        self._scan_adapter = None
+        self._added_id = None
+        self._added_callback = None
 
     # -- D-Bus helpers -----------------------------------------------------
     def _call(self, path, iface, method, args=None, reply=None, timeout_ms=-1):
@@ -163,19 +167,19 @@ class Transport:
             return False
 
     # -- discovery ---------------------------------------------------------
-    def find(self, timeout: float = 10.0, should_continue=None):
-        """Return a Device, or None. None is NORMAL: the pad sleeps and stops
-        advertising entirely when idle, and BLE cannot wake it.
-
-        should_continue is polled between scan slices. A scan blocks the main
-        loop, so without it a shutdown signal waits out the whole window.
-        """
-        objects = self._objects()
-        adopted = find_connected(objects)
-        if adopted is not None:
-            return adopted
-
-        adapter = self._adapter_path(objects)
+    #
+    # find() blocks, which is fine on the ordinary ladder: there is no live link
+    # to service while it runs. It is NOT fine when a person is standing there
+    # having just switched the pad on, because a 10 s block also stops stdin
+    # being read and the poll loop running. begin_scan/poll_scan/end_scan are
+    # the same discovery, taken apart so a caller can drive it from its own main
+    # loop one non-blocking look at a time. find() is now written in terms of
+    # them, so there is one discovery implementation rather than two.
+    def begin_scan(self) -> None:
+        """Start LE discovery and leave it running. Idempotent."""
+        if self._scanning:
+            return
+        adapter = self._adapter_path(self._objects())
         self._call(adapter, ADAPTER_IFACE, "SetDiscoveryFilter",
                    GLib.Variant("(a{sv})", ({"Transport": GLib.Variant("s", "le")},)))
         try:
@@ -183,6 +187,80 @@ class Transport:
         except GLib.Error as exc:
             if "InProgress" not in str(exc):
                 raise
+        self._scan_adapter = adapter
+        self._scanning = True
+
+    def poll_scan(self):
+        """One non-blocking look at BlueZ's object cache, or None.
+
+        Adoption comes first for the same reason it does in find(): a connected
+        pad does not advertise, so a link left behind by an ungraceful exit can
+        only ever be found this way.
+        """
+        objects = self._objects()
+        return find_connected(objects) or find_advertising(objects)
+
+    def end_scan(self) -> None:
+        """Stop discovery, if this transport is what started it."""
+        if not self._scanning:
+            return
+        self._scanning = False
+        adapter, self._scan_adapter = self._scan_adapter, None
+        try:
+            self._call(adapter, ADAPTER_IFACE, "StopDiscovery")
+        except GLib.Error:
+            # Another client may own discovery; that is not our failure.
+            pass
+
+    def watch_for_devices(self, callback) -> None:
+        """Call callback() when BlueZ first publishes a matching device object.
+
+        A WAKE-UP, not a result: it hands back no device, because connecting
+        from inside a D-Bus signal handler would reenter work the caller's own
+        loop already owns. The caller looks with poll_scan() when it wakes.
+
+        ⚠ This fires only on the FIRST appearance of an object. BlueZ keeps a
+        device it has already published and reports later advertisements as
+        property changes instead, so a pad seen minutes ago may produce no
+        signal at all. It is a shortcut for the cold case, never the only way a
+        caller may notice the pad -- keep polling as well.
+        """
+        if self._added_id is not None:
+            return
+        self._added_callback = callback
+        self._added_id = self._bus.signal_subscribe(
+            BLUEZ, OM_IFACE, "InterfacesAdded", "/", None,
+            Gio.DBusSignalFlags.NONE, self._on_interfaces_added, None,
+        )
+
+    def unwatch_devices(self) -> None:
+        if self._added_id is None:
+            return
+        self._bus.signal_unsubscribe(self._added_id)
+        self._added_id = None
+        self._added_callback = None
+
+    def _on_interfaces_added(self, _conn, _sender, _path, _iface, _signal,
+                             params, *_user_data):
+        _added_path, interfaces = params.unpack()
+        props = interfaces.get(DEVICE_IFACE)
+        if props is None or not matches_walkingpad(props):
+            return
+        if self._added_callback is not None:
+            self._added_callback()
+
+    def find(self, timeout: float = 10.0, should_continue=None):
+        """Return a Device, or None. None is NORMAL: the pad sleeps and stops
+        advertising entirely when idle, and BLE cannot wake it.
+
+        should_continue is polled between scan slices. A scan blocks the main
+        loop, so without it a shutdown signal waits out the whole window.
+        """
+        adopted = find_connected(self._objects())
+        if adopted is not None:
+            return adopted
+
+        self.begin_scan()
         try:
             deadline = time.monotonic() + timeout
             while True:
@@ -195,11 +273,7 @@ class Transport:
                     return None
                 time.sleep(SCAN_POLL_S)
         finally:
-            try:
-                self._call(adapter, ADAPTER_IFACE, "StopDiscovery")
-            except GLib.Error:
-                # Another client may own discovery; that is not our failure.
-                pass
+            self.end_scan()
 
     # -- connection --------------------------------------------------------
     def connect(self, device) -> None:
@@ -267,6 +341,10 @@ class Transport:
 
     # -- teardown ----------------------------------------------------------
     def disconnect(self) -> None:
+        # Discovery is deliberately NOT stopped here. Scanning and connecting
+        # are separate states, and a caller that is searching hard on purpose
+        # calls disconnect() first -- tearing its scan down under it would undo
+        # the search it just asked for.
         if self._signal_id is not None:
             self._bus.signal_unsubscribe(self._signal_id)
             self._signal_id = None

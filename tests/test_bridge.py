@@ -3,7 +3,13 @@ import json
 # tests/test_bridge.py
 import time
 
-from walkingpad.bridge import Bridge, IDLE_POLL_INTERVAL_S, MIN_REPEAT_INTERVAL_S
+from walkingpad.bridge import (
+    ATTENTION_TICK_S,
+    Bridge,
+    IDLE_POLL_INTERVAL_S,
+    MIN_REPEAT_INTERVAL_S,
+    RESCAN_BACKOFF_S,
+)
 from walkingpad import frames
 
 
@@ -512,3 +518,176 @@ def test_a_pending_start_keeps_the_poll_fast():
     assert b._poll_interval() == IDLE_POLL_INTERVAL_S
     b.handle_command({"cmd": "start", "kmh": 2.0})
     assert b._poll_interval() == POLL_INTERVAL_S
+
+
+class FakeDevice:
+    path = "/fake/dev"
+    address = "fake"
+    name = "KS-fake"
+
+
+class SearchingTransport:
+    """A transport that reports what a search actually did to the radio.
+
+    Separate from FakeTransport because the interesting counts here are the
+    ones a blocking find() never produces: how many times discovery was
+    started, and how many non-blocking looks were taken.
+    """
+
+    def __init__(self, appears_after=None):
+        self.connected = False
+        self.writes = []
+        self.finds = 0
+        self.scans_started = 0
+        self.scans_ended = 0
+        self.polls = 0
+        self.watches = 0
+        self.woken_by = None
+        self._appears_after = appears_after
+
+    def find(self, should_continue=None):
+        self.finds += 1
+        return None
+
+    def begin_scan(self):
+        self.scans_started += 1
+
+    def poll_scan(self):
+        self.polls += 1
+        if self._appears_after is not None and self.polls >= self._appears_after:
+            return FakeDevice()
+        return None
+
+    def end_scan(self):
+        self.scans_ended += 1
+
+    def watch_for_devices(self, callback):
+        self.watches += 1
+        self.woken_by = callback
+
+    def unwatch_devices(self):
+        self.woken_by = None
+
+    def connect(self, device):
+        self.connected = True
+
+    def subscribe(self, callback):
+        pass
+
+    def write(self, payload):
+        self.writes.append(payload)
+
+    def disconnect(self):
+        self.connected = False
+
+
+def test_attention_searches_without_blocking_on_find():
+    # The ordinary ladder can sit in a 30 s backoff and then block the loop for
+    # 10 s in find(). A person who just switched the pad on waits for both.
+    t = SearchingTransport()
+    b = Bridge(transport=t)
+    b.emit = lambda obj: None
+
+    b.handle_command({"cmd": "attention"})
+    delay = b._service_link()
+
+    assert t.finds == 0
+    assert t.scans_started == 1
+    assert t.polls == 1
+    assert delay == ATTENTION_TICK_S
+
+
+def test_attention_writes_nothing_to_the_pad():
+    # It is not a motion command: no frame, no safety gate, no throttle. Fact 17
+    # governs commands to the pad, and this sends none -- a belt under someone's
+    # feet is no more disturbed by it than by nothing at all.
+    t = SearchingTransport(appears_after=1)
+    b = Bridge(transport=t)
+    emitted = []
+    b.emit = emitted.append
+    b.goal_speed = 2.0
+    b.commanded_speed = 2.0
+
+    assert b.handle_command({"cmd": "attention"}) is None
+    b._service_link()
+
+    # The one write is the status query the link is polled with the instant it
+    # attaches -- that frame is what opens the safety gate the user is about to
+    # press against. No motion frame, and no refusal, comes out of a search.
+    assert t.writes == [frames.query()]
+    assert [obj for obj in emitted if obj["t"] == "error"] == []
+    # A search must not quietly cancel what the belt was already asked to do.
+    assert b.goal_speed == 2.0
+    assert b.commanded_speed == 2.0
+
+
+def test_a_search_announces_itself_once_not_on_every_look():
+    # The look runs at 2 Hz. Announcing "scanning" and calling Disconnect each
+    # time would put forty of each on the wire for one twenty-second search.
+    t = SearchingTransport()
+    b = Bridge(transport=t)
+    emitted = []
+    b.emit = emitted.append
+
+    b.handle_command({"cmd": "attention"})
+    for _ in range(5):
+        b._service_link()
+
+    scanning = [obj for obj in emitted if obj.get("state") == "scanning"]
+    assert len(scanning) == 1
+    assert t.scans_started == 1
+    assert t.watches == 1
+    assert t.polls == 5
+
+
+def test_a_found_pad_attaches_and_stops_discovering():
+    t = SearchingTransport(appears_after=3)
+    b = Bridge(transport=t)
+    emitted = []
+    b.emit = emitted.append
+
+    b.handle_command({"cmd": "attention"})
+    b._service_link()
+    b._service_link()
+    b._service_link()
+
+    assert t.connected is True
+    # Discovery stops before the connect, as it does on the ladder.
+    assert t.scans_ended == 1
+    assert t.woken_by is None
+    assert [obj["state"] for obj in emitted if obj["t"] == "link"] == [
+        "scanning", "connected",
+    ]
+
+
+def test_the_window_closes_and_the_ordinary_ladder_returns():
+    t = SearchingTransport()
+    b = Bridge(transport=t)
+    b.emit = lambda obj: None
+
+    b.handle_command({"cmd": "attention"})
+    b._service_link()
+    assert t.scans_started == 1
+    # Fact 3: a pad that is simply asleep must go back to being left alone.
+    b._attention_until = time.monotonic() - 0.1
+    delay = b._service_link()
+
+    assert t.scans_ended == 1
+    assert t.finds == 1
+    assert delay == RESCAN_BACKOFF_S
+
+
+def test_bluez_publishing_the_pad_wakes_the_next_look():
+    # The wake-up is a callback, never a device: connecting from inside a D-Bus
+    # signal handler would reenter the work the tick already owns.
+    t = SearchingTransport()
+    b = Bridge(transport=t)
+    b.emit = lambda obj: None
+    woken = []
+    b._schedule_tick = lambda delay: woken.append(delay)
+
+    b.handle_command({"cmd": "attention"})
+    b._service_link()
+    t.woken_by()
+
+    assert woken == [0.0]

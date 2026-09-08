@@ -102,6 +102,24 @@ class ReplayTransport:
             return None
         return self._device
 
+    # The attentive search the bridge runs after a user interaction drives
+    # discovery itself rather than through find(). There is no radio here, so
+    # scanning is a no-op and the pad is always "already advertising".
+    def begin_scan(self) -> None:
+        pass
+
+    def poll_scan(self):
+        return self._device
+
+    def end_scan(self) -> None:
+        pass
+
+    def watch_for_devices(self, callback) -> None:
+        pass
+
+    def unwatch_devices(self) -> None:
+        pass
+
     def connect(self, _device) -> None:
         self._connected = True
 

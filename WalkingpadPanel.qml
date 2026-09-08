@@ -325,6 +325,9 @@ Panel {
     // Seeded before the first frame so the chart never opens on a stale minute
     // from the last time the panel was up.
     if (root.opened) root.nowSeconds = Date.now() / 1000
+    // Opening the panel is the moment someone has just walked up to the pad,
+    // usually having switched it on. Ask the bridge to look now.
+    if (root.opened && service) service.requestAttention()
     // Assigned directly rather than via closeEditor(), which hands focus back
     // to the key catcher -- not something to do to a panel on its way out.
     root.editing = false

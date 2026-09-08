@@ -50,6 +50,17 @@ POLL_INTERVAL_S = 1.0          # while the belt is moving
 IDLE_POLL_INTERVAL_S = 2.0
 IDLE_AFTER_S = 60.0
 RESCAN_BACKOFF_S = 30.0        # the pad SLEEPS; absence is normal, do not storm
+# What "a person is present" buys, and why it is not the storm fact 3 forbids.
+#
+# The backoff above is right for a sleeping pad and wrong for the moment someone
+# has just switched one ON: the ordinary ladder can sit in backoff for 30 s
+# before it so much as looks, and then block the main loop for 10 s looking. So
+# a deliberate interaction opens a bounded window in which the bridge searches
+# from its own loop instead, twice a second, without blocking. The window closes
+# on its own and the long backoff returns; nothing here writes to the pad, so
+# fact 17's one-command-per-user-action rule is untouched.
+ATTENTION_WINDOW_S = 20.0
+ATTENTION_TICK_S = 0.5
 LINK_DEAD_AFTER_S = 15.0       # silence this long means the link is gone, not quiet
 MIN_REPEAT_INTERVAL_S = 1.0    # a repeated command inside this window is dropped
 START_SPEED_WINDOW_S = 8.0     # how long a start may wait for the belt to move
@@ -89,6 +100,11 @@ class Bridge:
         # is what stops a sleeping pad's endless rescans writing anything.
         self._connection_open = False
         self._frames_this_connection = 0
+        # Until when a person is known to be looking, and whether the search
+        # that opened for them has its discovery and wake-up running.
+        self._attention_until = 0.0
+        self._attentive_scanning = False
+        self._tick_source = None
         self._stopped_since = time.monotonic()
         self._bad_frames = 0
         self._stdin_buffer = b""
@@ -118,6 +134,15 @@ class Bridge:
 
     def handle_command(self, obj: dict) -> bytes | None:
         cmd = obj.get("cmd")
+
+        if cmd == "attention":
+            # Not a motion command. It writes nothing to the pad, so there is no
+            # safety gate to pass, nothing to clamp and no burst to throttle --
+            # it only reports that someone opened the panel or reached for a
+            # control, which is exactly when a pad that was just switched on is
+            # waiting to be found.
+            self._note_attention()
+            return None
 
         # An unknown command has nothing to refuse, and reporting "refusing to
         # move the belt" for one would put a wrong error code on the wire for
@@ -519,9 +544,103 @@ class Bridge:
         """
         return round(max(0.0, self._last_status_at - self._connected_at), 2)
 
+    def _note_attention(self) -> None:
+        """Record that a person is present, and look now rather than on the ladder."""
+        self._attention_until = time.monotonic() + ATTENTION_WINDOW_S
+        if not self.transport.connected and self._loop is not None:
+            self._wake_tick()
+
+    def _attentive(self) -> bool:
+        return time.monotonic() < self._attention_until
+
+    def _attach(self, device):
+        """Connect, subscribe and announce. None means the link came up."""
+        try:
+            self.transport.connect(device)
+            self.transport.subscribe(self.on_notify)
+        except Exception as exc:
+            # The pad has one BLE connection and the phone app holding it lands
+            # here. Spec §8: surface it as a state, do not retry into it. A
+            # second bridge on this host would NOT land here -- BlueZ shares its
+            # link between local clients (fact 5).
+            self.emit({"t": "link", "state": "unavailable", "msg": str(exc)})
+            self.transport.disconnect()
+            return RESCAN_BACKOFF_S
+        self._connected_at = time.monotonic()
+        self._connection_open = True
+        self._frames_this_connection = 0
+        self.emit({"t": "link", "state": "connected",
+                   "addr": device.address, "name": device.name})
+        return None
+
+    def _attentive_search(self):
+        """One non-blocking look for the pad. None means the link came up.
+
+        The setup is latched because this runs at 2 Hz: announcing "scanning"
+        and calling Disconnect on every look would put forty of each into one
+        twenty-second window, for a single search.
+        """
+        if not self._attentive_scanning:
+            # Same reason as the ladder below: rescanning without tearing down
+            # first orphans the FE01 subscription, and every orphan makes
+            # on_notify run once more per frame (measured 2026-08-27).
+            self.transport.disconnect()
+            self.emit({"t": "link", "state": "scanning"})
+            # Before anything that can fail: a row already written survives a
+            # crash inside the search.
+            self._end_connection("dropped")
+            try:
+                self.transport.begin_scan()
+                # So the pad appearing is noticed in milliseconds rather than at
+                # the next look. It cannot REPLACE looking: BlueZ publishes a
+                # device object once and reports later advertisements as
+                # property changes, so a pad seen recently fires nothing.
+                self.transport.watch_for_devices(self._wake_tick)
+            except Exception as exc:
+                self.emit({"t": "link", "state": "error", "msg": str(exc)})
+                self._end_attentive_search()
+                self._attention_until = 0.0
+                return RESCAN_BACKOFF_S
+            self._attentive_scanning = True
+
+        try:
+            device = self.transport.poll_scan()
+        except Exception as exc:
+            self.emit({"t": "link", "state": "error", "msg": str(exc)})
+            self._end_attentive_search()
+            self._attention_until = 0.0
+            return RESCAN_BACKOFF_S
+        if device is None:
+            return ATTENTION_TICK_S
+
+        # Discovery stops before the connect, as it does on the ladder: scanning
+        # and connecting at the same time is slower on every controller.
+        self._end_attentive_search()
+        return self._attach(device)
+
+    def _end_attentive_search(self) -> None:
+        if not self._attentive_scanning:
+            return
+        self._attentive_scanning = False
+        try:
+            self.transport.unwatch_devices()
+            self.transport.end_scan()
+        except Exception as exc:
+            self.emit({"t": "link", "state": "error", "msg": str(exc)})
+
     def _service_link(self) -> float:
         """Do one unit of link work. Returns seconds until the next tick."""
+        if not self.transport.connected and self._attentive():
+            delay = self._attentive_search()
+            if delay is not None:
+                return delay
+            # Attached inside the window. Fall through to poll the new link now,
+            # so its first status frame does not wait a whole tick -- that frame
+            # is what opens the safety gate the user is about to press against.
+
         if not self.transport.connected:
+            # The window is over, or never opened. Back to the ladder.
+            self._end_attentive_search()
             # BlueZ drops the link on its own and Connected goes False without
             # any path here having torn it down. Measured 2026-08-27: rescanning
             # straight from this branch left the FE01 notification subscription
@@ -552,22 +671,9 @@ class Bridge:
                 # it gets a long backoff and no alarm.
                 self.emit({"t": "link", "state": "absent"})
                 return RESCAN_BACKOFF_S
-            try:
-                self.transport.connect(device)
-                self.transport.subscribe(self.on_notify)
-            except Exception as exc:
-                # The pad has one BLE connection and the phone app holding it
-                # lands here. Spec §8: surface it as a state, do not retry into
-                # it. A second bridge on this host would NOT land here -- BlueZ
-                # shares its link between local clients (fact 5).
-                self.emit({"t": "link", "state": "unavailable", "msg": str(exc)})
-                self.transport.disconnect()
-                return RESCAN_BACKOFF_S
-            self._connected_at = time.monotonic()
-            self._connection_open = True
-            self._frames_this_connection = 0
-            self.emit({"t": "link", "state": "connected",
-                       "addr": device.address, "name": device.name})
+            delay = self._attach(device)
+            if delay is not None:
+                return delay
 
         # BlueZ saying "Connected" is NOT proof of a working link. Measured
         # 2026-08-24: after an ungraceful exit BlueZ kept Connected=True on a
@@ -616,6 +722,7 @@ class Bridge:
         return self._running
 
     def _tick(self) -> bool:
+        self._tick_source = None
         try:
             delay = self._service_link()
         except KeyboardInterrupt:
@@ -626,8 +733,23 @@ class Bridge:
             return False
         # Rescheduled one shot at a time because the interval varies: 1 s while
         # walking, 5 s once idle, 30 s while the pad is asleep.
-        GLib.timeout_add(int(delay * 1000), self._tick)
+        self._schedule_tick(delay)
         return False
+
+    def _schedule_tick(self, delay: float) -> None:
+        """Replace the pending tick, so a wake-up cannot leave two running."""
+        if self._tick_source is not None:
+            GLib.source_remove(self._tick_source)
+        self._tick_source = GLib.timeout_add(int(delay * 1000), self._tick)
+
+    def _wake_tick(self) -> None:
+        """Bring the next look forward to now.
+
+        Called from the stdin handler and from BlueZ's InterfacesAdded signal.
+        Both are main-loop callbacks and the loop is single-threaded, so this
+        never races the tick it is rescheduling.
+        """
+        self._schedule_tick(0.0)
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> None:
@@ -647,6 +769,9 @@ class Bridge:
             # whose answered_s says nothing about the mute, and leaving it out
             # would bias the log toward connections that died on their own.
             self._end_connection("shutdown")
+            # A search left running would leave the adapter discovering for the
+            # life of the session.
+            self._end_attentive_search()
             if self.store is not None:
                 self.store.close()
             self.transport.disconnect()

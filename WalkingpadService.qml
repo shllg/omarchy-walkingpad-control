@@ -104,8 +104,31 @@ Item {
       state.lastErrorCode = ""
       state.lastErrorMessage = ""
     }
+    // Pressing a control on a link that is down is the plainest evidence there
+    // is that someone is waiting for the pad, so it opens the bridge's search
+    // window as well as being answered on its own terms. Done here rather than
+    // at each call site so no control can be added later that forgets to.
+    if (root.linkState !== "connected") {
+      bridgeProc.write(JSON.stringify({ cmd: "attention" }) + "\n")
+    }
     bridgeProc.write(JSON.stringify(obj) + "\n")
     return true
+  }
+
+  // Tell the bridge a person is present and looking.
+  //
+  // NOT a command to the pad: it writes no frame, passes no safety gate and
+  // clamps nothing. It only shortens the wait for a pad that was just switched
+  // on, which the ordinary ladder can leave in a 30 s backoff.
+  //
+  // Deliberately not routed through send(): send() clears the refusal message,
+  // and this is not a thing the user did to the belt. Opening the panel to read
+  // why a press was refused must not wipe the answer on the way in.
+  function requestAttention() {
+    if (!bridgeProc.running) return
+    // Nothing to find on a live link, and the bridge would only ignore it.
+    if (root.linkState === "connected") return
+    bridgeProc.write(JSON.stringify({ cmd: "attention" }) + "\n")
   }
 
   Timer {
