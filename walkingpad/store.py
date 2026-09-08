@@ -26,8 +26,21 @@ DEFAULT_STORE_DIR = os.path.join(
     "walkingpad",
 )
 TAIL_S = 5.0
-MIN_RESIDUAL_ELAPSED_S = 30
-MIN_RESIDUAL_DIST_KM = 0.05
+# The floor below which an unplaced delta is counter noise rather than walking.
+# Design plan §1.4 justifies it as "counter quantisation and rounding", and these
+# are that quantisation: the pad reports elapsed_s in whole seconds and distance
+# in 10 m units, so one quantum each is 1 s and 0.01 km. A delta larger than that
+# is the pad's own testimony that the belt ran, and the wall-clock window bounds
+# when -- which is exactly what `observed: false` already claims and no more.
+#
+# ⚠ These were 30 s and 0.05 km, two orders of magnitude above the quantisation
+# they cited. Measured 2026-09-08: with the pad going mute ~29 s into every
+# connection (open question 9), one walk arrives as ~29 s runs of frames split by
+# ~20 s holes, and every hole -- ~20 s and ~27 steps -- fell under BOTH floors.
+# 1317 of that day's 3165 steps were dropped, and roughly 40% of every walk since
+# 2026-08-27. Raising these again re-opens that hole; the pad counted this.
+MIN_RESIDUAL_ELAPSED_S = 2
+MIN_RESIDUAL_DIST_KM = 0.02
 STATE_WRITE_INTERVAL_S = 10.0
 
 # store.py has no BLE knowledge (design §3.1), and record() sees only freshly

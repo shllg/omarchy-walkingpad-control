@@ -203,8 +203,11 @@ def test_continuous_delta_without_an_open_bout_stays_in_residual(tmp_path):
     store.record(make_status(), None, None)
     clock.advance(LINK_GAP_S - 1)
 
+    # One quantum of each counter: elapsed_s is whole seconds and distance comes
+    # in 10 m units, so this delta is indistinguishable from rounding at the two
+    # ends of the window and has no walking in it to place.
     store.record(
-        make_status(elapsed_s=10, distance_km=0.04, steps=20),
+        make_status(elapsed_s=1, distance_km=0.01, steps=1),
         None,
         None,
     )
@@ -214,7 +217,7 @@ def test_continuous_delta_without_an_open_bout_stays_in_residual(tmp_path):
         "elapsed_s": 0, "dist_km": 0.0, "steps": 0,
     }
     assert store.last_pad == {
-        "elapsed_s": 10, "dist_km": 0.04, "steps": 20,
+        "elapsed_s": 1, "dist_km": 0.01, "steps": 1,
     }
 
 
@@ -253,8 +256,10 @@ def test_sub_threshold_link_gap_is_not_written_or_attributed(tmp_path):
     )
     clock.advance(LINK_GAP_S + 1)
 
+    # A gap the pad did NOT walk through: one quantum of each counter is what a
+    # link that dropped and returned on an idle belt looks like.
     store.record(
-        make_status(elapsed_s=110, distance_km=1.04, steps=210),
+        make_status(elapsed_s=101, distance_km=1.01, steps=201),
         None,
         None,
     )
@@ -264,8 +269,47 @@ def test_sub_threshold_link_gap_is_not_written_or_attributed(tmp_path):
         "elapsed_s": 100, "dist_km": 1.0, "steps": 200,
     }
     assert store.last_pad == {
-        "elapsed_s": 110, "dist_km": 1.04, "steps": 210,
+        "elapsed_s": 101, "dist_km": 1.01, "steps": 201,
     }
+
+
+def test_a_mute_gap_the_pad_itself_counted_is_still_attributed(tmp_path):
+    # Measured 2026-09-08: the pad answers for ~29 s after each connect and then
+    # goes mute (design spec open question 9), so one continuous walk reaches the
+    # store as ~29 s runs of frames separated by ~20 s holes. Every hole carried
+    # about 20 s of the pad's OWN running-second counter and ~27 steps, which is
+    # two orders of magnitude above counter quantisation and not ambiguous at
+    # all. The 30 s / 50 m floors discarded all 49 of that day's holes -- 1317 of
+    # 3165 steps, missing from history and then from the residual too once the
+    # next epoch reset cleared it.
+    clock = FakeClock()
+    last_frame_wall = clock.wall
+    store = Store(tmp_path, now=clock)
+    store.record(
+        make_status(belt="running", speed_kmh=2.5,
+                    elapsed_s=100, distance_km=1.00, steps=200),
+        None,
+        None,
+    )
+    clock.advance(20.3)
+
+    store.record(
+        make_status(belt="running", speed_kmh=2.5,
+                    elapsed_s=120, distance_km=1.02, steps=227),
+        None,
+        None,
+    )
+
+    assert read_jsonl(tmp_path / "bouts.jsonl") == [{
+        "e": 0,
+        "start": last_frame_wall,
+        "end": clock.wall,
+        "observed": False,
+        "dur_s": 20,
+        "dist_km": 0.02,
+        "steps": 27,
+    }]
+    assert store.attributed == store.last_pad
 
 
 def test_bout_totals_equal_attributed_across_mixed_sequence(tmp_path):
@@ -298,8 +342,8 @@ def test_bout_totals_equal_attributed_across_mixed_sequence(tmp_path):
         None,
     )
 
-    # One sub-threshold link gap and one continuous no-bout delta both remain
-    # visible in residual; neither is allowed to advance attribution by itself.
+    # One link gap and one continuous no-bout delta, both above quantisation and
+    # therefore both placed as unobserved bouts rather than dropped.
     clock.advance(LINK_GAP_S + 1)
     store.record(
         make_status("idle", elapsed_s=20, distance_km=0.08, steps=30),
@@ -353,8 +397,59 @@ def test_bout_totals_equal_attributed_across_mixed_sequence(tmp_path):
     assert {bout["observed"] for bout in bouts} == {True, False}
     assert bout_totals == store.attributed
     assert store.attributed == {
-        "elapsed_s": 55, "dist_km": 0.14, "steps": 90,
+        "elapsed_s": 75, "dist_km": 0.22, "steps": 110,
     }
+    # Nothing above quantisation was left unplaced, so the §1.2 self-check
+    # closes at zero: every counter the pad advanced reached a bout.
+    assert store.attributed == store.last_pad
+
+
+def test_a_whole_walk_of_mute_cycles_loses_nothing(tmp_path):
+    """The measured 2026-09-08 failure, end to end.
+
+    The pad answers ~29 s per connection and then goes mute (open question 9),
+    so a continuous walk reaches the store as runs of frames split by ~20 s
+    holes. Under the old floors every hole fell through and the §1.2 self-check
+    closed 42% short. It must now close at zero: every counter the pad advanced
+    reaches a bout, and the ones nobody watched say so.
+    """
+    clock = FakeClock()
+    store = Store(tmp_path, now=clock)
+    pad = {"elapsed_s": 0.0, "dist_km": 0.0, "steps": 0.0}
+
+    def frame(belt="running"):
+        return make_status(
+            belt=belt, speed_kmh=2.5,
+            elapsed_s=int(pad["elapsed_s"]),
+            distance_km=round(pad["dist_km"], 2),
+            steps=int(pad["steps"]),
+        )
+
+    def walk(seconds):
+        # Accumulate at full precision; one second at 2.5 km/h is 0.7 m and 0.9
+        # of a step, so quantising each tick would floor the walk to nothing.
+        distance = 2.5 / 3600.0 * seconds
+        pad["elapsed_s"] += seconds
+        pad["dist_km"] += distance
+        pad["steps"] += distance * 1300
+
+    for _ in range(20):
+        for _ in range(29):
+            store.record(frame(), None, None)
+            clock.advance(1)
+            walk(1)
+        # The mute: the belt runs on and not one frame reaches the store.
+        walk(20)
+        clock.advance(20)
+    store.record(frame("stopped"), None, None)
+    store.close()
+
+    bouts = read_jsonl(tmp_path / "bouts.jsonl")
+    reconstructed = [bout for bout in bouts if not bout["observed"]]
+    assert len(reconstructed) == 20
+    assert store.attributed == store.last_pad
+    assert sum(bout["steps"] for bout in bouts) == store.last_pad["steps"]
+    assert sum(bout["dur_s"] for bout in bouts) == store.last_pad["elapsed_s"]
 
 
 def test_first_frame_adopts_high_counters_without_a_residual(tmp_path):

@@ -1,0 +1,283 @@
+#!/usr/bin/python3
+"""Recover walking that the store's old residual floors discarded.
+
+Design plan §2.2 keeps the pad's cumulative counters in samples/ raw rather than
+as deltas, so that "a bug in today's attribution logic is repairable tomorrow
+from evidence that was never thrown away". This is that repair.
+
+WHAT WAS LOST
+-------------
+The pad answers for ~29 s after each connection and then goes mute (design spec
+open question 9), so one continuous walk reaches the store as ~29 s runs of
+frames separated by ~20 s holes. store.py's link-gap branch writes an unobserved
+bout for a hole only when its delta clears MIN_RESIDUAL_*, and those floors were
+30 s / 50 m -- two orders of magnitude above the counter quantisation they were
+justified by. Every hole (~20 s, ~27 steps) fell under both. Measured
+2026-09-08: 1317 of that day's 3165 steps, and roughly 40% of every walk since
+2026-08-27, reached neither a bout nor -- once the next epoch reset cleared the
+residual -- any total at all.
+
+WHY IT ADDS ROWS RATHER THAN REBUILDING bouts.jsonl
+---------------------------------------------------
+Samples are only written while the belt is active, so replaying them through a
+fresh Store would silently drop every bout whose samples predate sample
+retention, and would renumber epochs that existing rows already carry. This
+walks the sample stream instead and appends exactly the rows the fixed store
+would have written, leaving every existing row and epoch id untouched. It is
+idempotent: a hole that already has its bout is skipped.
+
+The thresholds and the gap width are IMPORTED from walkingpad.store rather than
+restated, because the one thing this tool must never do is disagree with the
+live writer about which holes are walking.
+"""
+import os
+import sys
+
+# ⚠ Load-bearing, as in bin/walkingpad-stats. This repository is the installed
+# plugin and the shell watches its directory recursively; a stray __pycache__
+# write looks like a plugin edit and triggers a reload that kills the live
+# bridge. This tool imports walkingpad.store, so the guard is not optional here.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import argparse
+import json
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+from walkingpad.store import (
+    DEFAULT_STORE_DIR,
+    LINK_GAP_S,
+    MIN_RESIDUAL_DIST_KM,
+    MIN_RESIDUAL_ELAPSED_S,
+)
+
+# A repair rewrites bouts.jsonl whole, and the bridge appends to that same file
+# whenever a bout closes. Rather than demand the shell be stopped -- which is a
+# real disruption, since the bridge is the live belt control -- the write below
+# re-stats the file immediately before the swap and refuses if anything appended
+# since it was read. That narrows the race to the replace itself instead of
+# hoping a person remembered to quit first.
+
+
+class RepairError(Exception):
+    """The repair cannot proceed, with a reason meant for a person."""
+
+
+def emit(payload):
+    print(json.dumps(payload, allow_nan=False, indent=2))
+
+
+def read_jsonl(path):
+    rows = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return rows
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            # One unreadable line is evidence we must not silently reinterpret.
+            raise RepairError(f"{path} contains a line that is not valid JSON")
+    return rows
+
+
+def read_samples(root):
+    rows = []
+    for path in sorted((root / "samples").glob("*.jsonl")):
+        rows.extend(read_jsonl(path))
+    # Day files partition the stream, but a gap can straddle midnight, so the
+    # scan below needs one chronological sequence rather than per-file runs.
+    rows.sort(key=lambda row: row["t"])
+    return rows
+
+
+def is_placeable(delta):
+    """The rule store.py applies to a link-gap delta, imported not restated."""
+    return (delta["elapsed_s"] >= MIN_RESIDUAL_ELAPSED_S
+            or delta["dist_km"] >= MIN_RESIDUAL_DIST_KM)
+
+
+def gap_bouts(samples):
+    """Every unobserved bout the fixed store would have written for a hole."""
+    recovered = []
+    previous = None
+    for sample in samples:
+        if previous is not None and sample["e"] == previous["e"]:
+            elapsed = sample["pe"] - previous["pe"]
+            distance = round(sample["d"] - previous["d"], 2)
+            steps = sample["s"] - previous["s"]
+            # A counter going backwards is an epoch reset the store handled by
+            # re-baselining; there is no delta to place across one.
+            went_backwards = elapsed < 0 or distance < 0 or steps < 0
+            delta = {
+                "elapsed_s": elapsed,
+                "dist_km": distance,
+                "steps": steps,
+            }
+            if (sample["t"] - previous["t"] > LINK_GAP_S
+                    and not went_backwards
+                    and is_placeable(delta)):
+                recovered.append({
+                    "e": sample["e"],
+                    "start": previous["t"],
+                    "end": sample["t"],
+                    "observed": False,
+                    "dur_s": elapsed,
+                    "dist_km": distance,
+                    "steps": steps,
+                })
+        previous = sample
+    return recovered
+
+
+def overlaps(row, bout):
+    """Whether an existing bout already accounts for any of this hole.
+
+    Strict on both sides on purpose: store.py starts a link-gap bout at exactly
+    the previous bout's end, so touching endpoints are adjacency, not overlap.
+    """
+    return bout["start"] < row["end"] and bout["end"] > row["start"]
+
+
+def missing_bouts(samples, existing):
+    """Holes with no existing bout over them, so a repair can only add.
+
+    ⚠ Matching endpoints exactly is NOT enough, and assuming it was would have
+    double-counted on the first real store this ran against. state.json is
+    rewritten at most every STATE_WRITE_INTERVAL_S, so after a restart the
+    recovered last_seen_wall can trail the last sample by up to 10 s; the bout
+    the store wrote for that hole then starts EARLIER than the sample stream
+    says and no key comparison finds it. Measured on 2026-08-28: one existing
+    51-step unobserved bout covering a hole this scan reads as 39 steps.
+
+    Covering only part of a hole still skips the whole hole. That under-recovers
+    by design -- the counters are already in a bout either way, and the failure
+    this repair exists to fix is walking counted zero times, never twice.
+    """
+    return [row for row in gap_bouts(samples)
+            if not any(overlaps(row, bout) for bout in existing)]
+
+
+def summarise(recovered):
+    by_day = {}
+    for row in recovered:
+        day = datetime.fromtimestamp(
+            row["start"], tz=timezone.utc
+        ).strftime("%Y-%m-%d")
+        bucket = by_day.setdefault(
+            day, {"bouts": 0, "dur_s": 0, "dist_km": 0.0, "steps": 0})
+        bucket["bouts"] += 1
+        bucket["dur_s"] += row["dur_s"]
+        bucket["dist_km"] = round(bucket["dist_km"] + row["dist_km"], 2)
+        bucket["steps"] += row["steps"]
+    return by_day
+
+
+def refuse_if_walking(root):
+    """A bout still open means the bridge is mid-walk and will append shortly.
+
+    Its counters are also still being attributed, so the delta this tool would
+    place could be claimed by that bout a second later. Wait for the belt.
+    """
+    try:
+        state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RepairError(f"state.json could not be read: {exc}")
+    if state.get("open_bout") is not None:
+        raise RepairError(
+            "a walk is open in state.json; stop the belt and let the bridge "
+            "close the bout, then repair")
+
+
+def fingerprint(path):
+    """Size and mtime, for detecting an append between the read and the swap."""
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return (info.st_size, info.st_mtime_ns)
+
+
+def write_bouts(root, rows, expected):
+    bouts_path = root / "bouts.jsonl"
+    if bouts_path.is_symlink():
+        raise RepairError(f"{bouts_path} is a symlink; refusing to write")
+    now = datetime.now(tz=timezone.utc).timestamp()
+    stamp = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = root / f"bouts.jsonl.bak-{stamp}"
+    if bouts_path.exists():
+        backup.write_bytes(bouts_path.read_bytes())
+        os.chmod(backup, 0o600)
+    handle, temporary = tempfile.mkstemp(dir=root, prefix=".bouts-repair-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(temporary, 0o600)
+        # Last possible moment: if the bridge closed a bout while this ran, the
+        # merge above is already missing it and the swap would delete it.
+        if fingerprint(bouts_path) != expected:
+            raise RepairError(
+                "bouts.jsonl changed while the repair was preparing; "
+                "nothing was written -- run it again")
+        os.replace(temporary, bouts_path)
+    except BaseException:
+        os.unlink(temporary)
+        raise
+    return str(backup) if bouts_path.exists() else None
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        description="Recover link-gap walking the old residual floors dropped")
+    parser.add_argument("--store", default=DEFAULT_STORE_DIR)
+    parser.add_argument(
+        "--apply", action="store_true",
+        help="rewrite bouts.jsonl; without it nothing is written")
+    arguments = parser.parse_args(argv)
+
+    root = Path(arguments.store)
+    samples = read_samples(root)
+    before = fingerprint(root / "bouts.jsonl")
+    existing = read_jsonl(root / "bouts.jsonl")
+    recovered = missing_bouts(samples, existing)
+
+    payload = {
+        "store": str(root),
+        "applied": False,
+        "recovered_bouts": len(recovered),
+        "recovered_steps": sum(row["steps"] for row in recovered),
+        "recovered_dist_km": round(
+            sum(row["dist_km"] for row in recovered), 2),
+        "recovered_dur_s": sum(row["dur_s"] for row in recovered),
+        "longest_gap_s": round(max(
+            (row["end"] - row["start"] for row in recovered), default=0.0), 1),
+        "holes_already_covered": len(gap_bouts(samples)) - len(recovered),
+        "by_day": summarise(recovered),
+    }
+
+    if arguments.apply and recovered:
+        refuse_if_walking(root)
+        merged = sorted(existing + recovered, key=lambda row: row["start"])
+        payload["backup"] = write_bouts(root, merged, before)
+        payload["applied"] = True
+        payload["total_bouts"] = len(merged)
+    emit(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except RepairError as exc:
+        emit({"error": str(exc)})
+        sys.exit(1)
