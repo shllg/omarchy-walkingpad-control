@@ -69,8 +69,13 @@ hardcoded values do not follow the active theme.
 
 ## Development loop
 
-1. Run `omarchy plugin validate <repo>`.
-2. Lint each QML file. Use `/usr/lib/qt6/bin/qmllint` explicitly -- the bare
+1. Run `bin/check-repo` on an Omarchy machine. It validates an exported tree of
+   tracked and non-ignored new files, runs QML lint, and runs the tests. Do not
+   validate this checkout directly: the ignored skill symlinks are development
+   files, and the validator rejects any symlink in the directory it scans.
+   For a clean installed clone or a separate export, `omarchy plugin validate
+   <plugin-folder>` is valid.
+2. To lint a single QML file, use `/usr/lib/qt6/bin/qmllint` explicitly -- the bare
    name resolves to the Qt 5 binary, which exits 255 with no output on Qt 6
    QML -- and give `-I` a directory containing a `qs` symlink to the shell, or
    `qs.Commons` and `qs.Ui` silently fail to resolve:

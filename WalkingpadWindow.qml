@@ -2,6 +2,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
+import QtQuick.Controls as Controls
 import qs.Commons
 import qs.Ui
 import "WalkingpadModel.js" as Model
@@ -36,7 +37,7 @@ Item {
   property string fontFamily: Style.font.menuFamily
   readonly property int cornerRadius: Style.cornerRadius
   readonly property int contentMargin: Style.spacing.panelPadding
-  readonly property color muted: Qt.darker(root.foreground, 1.6)
+  readonly property color muted: Util.alpha(root.foreground, 0.72)
 
   function urlToLocalPath(url) {
     var value = url.toString()
@@ -91,6 +92,8 @@ Item {
   property string detailError: ""
 
   readonly property bool sessionMode: root.selectedSessionStart !== null
+  readonly property bool profileLoading: profileProc.running || profileProc.queued
+  readonly property bool sessionsLoading: sessionsProc.running || sessionsProc.queued
 
   // ------------------------------------------------------------- formatting
   function finiteNumber(value) {
@@ -157,6 +160,13 @@ Item {
 
   function formatClock(seconds) {
     return Qt.formatTime(new Date(root.numeric(seconds) * 1000), "HH:mm")
+  }
+
+  function formatPeriodTime(seconds) {
+    var start = new Date(root.periodRangeStart * 1000)
+    var end = new Date(root.periodRangeEnd * 1000)
+    return (root.localDateISO(start) !== root.localDateISO(end)
+      ? root.formatDay(seconds) + " · " : "") + root.formatClock(seconds)
   }
 
   function formatDay(seconds) {
@@ -520,6 +530,7 @@ Item {
       if (root.periodOptions[i].key === value) known = true
     }
     if (!known) return
+    paneScroll.contentY = 0
 
     if (root.period === value) {
       // Clicking the period the rail is already scoped to is the way BACK from a
@@ -530,6 +541,7 @@ Item {
     }
 
     root.period = value
+    sessionScroll.contentY = 0
     // Charts §2.1: selecting a period clears the session. One thing is selected.
     root.clearSession()
     root.profile = root.emptyProfile()
@@ -542,6 +554,7 @@ Item {
   }
 
   function selectSession(session) {
+    paneScroll.contentY = 0
     root.selectedSessionStart = session.start
     root.detailSession = null
     root.detailSamples = []
@@ -578,7 +591,9 @@ Item {
     // it could ever be seen. It reads the whole store, so it is far too heavy
     // for the poll loop and exactly right here.
     root.refreshVerify()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    paneScroll.contentY = 0
+    sessionScroll.contentY = 0
+    Qt.callLater(function() { analysisCard.forceActiveFocus() })
   }
 
   function close() {
@@ -712,19 +727,6 @@ Item {
       onClicked: root.dismiss()
     }
 
-    Item {
-      id: keyCatcher
-      anchors.fill: parent
-      focus: true
-      Keys.priority: Keys.BeforeItem
-      // This is a browsable data view. Only Escape dismisses it; a catch-all
-      // handler would consume keys from any focusable controls added later.
-      Keys.onEscapePressed: function(event) {
-        root.dismiss()
-        event.accepted = true
-      }
-    }
-
     BorderSurface {
       id: analysisCard
       width: Math.min(parent.width * 0.82, Style.space(1800))
@@ -734,6 +736,13 @@ Item {
       color: root.background
       borderSpec: root.borderSpec
       padding: root.contentMargin
+      focus: true
+      Keys.priority: Keys.BeforeItem
+      // Keep Escape on the controls' ancestor so it also works after Tab.
+      Keys.onEscapePressed: function(event) {
+        root.dismiss()
+        event.accepted = true
+      }
 
       // The full-screen dismiss target sits behind the card. This catcher
       // prevents unused card space from behaving like an outside click.
@@ -758,12 +767,15 @@ Item {
           Text {
             id: windowTitle
             anchors.left: parent.left
+            anchors.right: closeButton.left
+            anchors.rightMargin: Style.spacing.lg
             anchors.verticalCenter: parent.verticalCenter
             text: "WalkingPad · History"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.heading
             font.bold: true
+            elide: Text.ElideRight
           }
 
           Button {
@@ -771,6 +783,11 @@ Item {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: "✕"
+            tooltipText: "Close history (Esc)"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Close history"
+            Accessible.onPressAction: root.dismiss()
             fontSize: Style.font.body
             foreground: root.foreground
             accent: root.accent
@@ -797,7 +814,7 @@ Item {
           anchors.topMargin: Style.spacing.panelGap
           anchors.left: parent.left
           anchors.bottom: parent.bottom
-          width: Style.space(230)
+          width: Math.min(Style.space(230), parent.width * 0.28)
 
           Column {
             id: periodColumn
@@ -810,7 +827,7 @@ Item {
             Repeater {
               model: root.periodOptions
 
-              Rectangle {
+              BorderSurface {
                 id: periodRow
                 required property var modelData
                 // Two different facts, deliberately shown differently. `scoping`
@@ -827,6 +844,16 @@ Item {
                 implicitHeight: periodText.implicitHeight
                   + Style.spacing.controlPaddingY * 2
                 radius: Style.cornerRadius
+                activeFocusOnTab: true
+                borderSpec: activeFocus
+                  ? Border.controlSpec("focus", root.foreground, root.accent)
+                  : Border.none()
+                Accessible.role: Accessible.Button
+                Accessible.name: periodRow.modelData.label
+                Accessible.onPressAction: root.setPeriod(periodRow.modelData.key)
+                Keys.onReturnPressed: root.setPeriod(periodRow.modelData.key)
+                Keys.onEnterPressed: root.setPeriod(periodRow.modelData.key)
+                Keys.onSpacePressed: root.setPeriod(periodRow.modelData.key)
                 color: periodRow.selected
                   ? root.chip
                   : (periodMouse.containsMouse
@@ -855,7 +882,10 @@ Item {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.setPeriod(periodRow.modelData.key)
+                  onClicked: {
+                    periodRow.forceActiveFocus(Qt.MouseFocusReason)
+                    root.setPeriod(periodRow.modelData.key)
+                  }
                 }
               }
             }
@@ -867,7 +897,7 @@ Item {
             anchors.topMargin: Style.spacing.panelGap
             anchors.left: parent.left
             anchors.leftMargin: Style.spacing.controlPaddingX
-            text: "SESSIONS"
+            text: "SESSIONS" + (root.sessions.length > 0 ? " · " + root.sessions.length : "")
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -883,10 +913,12 @@ Item {
             contentWidth: width
             contentHeight: sessionColumn.implicitHeight
             clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Controls.ScrollBar.vertical: ScrollHandle {}
 
             Column {
               id: sessionColumn
-              width: parent.width
+              width: Math.max(0, parent.width - Style.spacing.md * 2)
               spacing: Style.spacing.xxs
 
               SectionNote {
@@ -896,13 +928,13 @@ Item {
 
               SectionNote {
                 visible: root.sessionsError === "" && root.sessions.length === 0
-                text: "No walks in this period"
+                text: root.sessionsLoading ? "Loading sessions…" : "No walks in this period"
               }
 
               Repeater {
                 model: root.sessions
 
-                Rectangle {
+                BorderSurface {
                   id: sessionRow
                   required property var modelData
                   readonly property bool selected: root.sessionMode
@@ -913,6 +945,22 @@ Item {
                   implicitHeight: sessionLabels.implicitHeight
                     + Style.spacing.controlPaddingY * 2
                   radius: Style.cornerRadius
+                  activeFocusOnTab: true
+                  borderSpec: activeFocus
+                    ? Border.controlSpec("focus", root.foreground, root.accent)
+                    : Border.none()
+                  Accessible.role: Accessible.Button
+                  Accessible.name: root.railLabel(sessionRow.modelData)
+                  Accessible.onPressAction: root.selectSession(sessionRow.modelData)
+                  Keys.onReturnPressed: root.selectSession(sessionRow.modelData)
+                  Keys.onEnterPressed: root.selectSession(sessionRow.modelData)
+                  Keys.onSpacePressed: root.selectSession(sessionRow.modelData)
+                  onActiveFocusChanged: {
+                    if (!activeFocus) return
+                    if (y < sessionScroll.contentY) sessionScroll.contentY = y
+                    else if (y + height > sessionScroll.contentY + sessionScroll.height)
+                      sessionScroll.contentY = y + height - sessionScroll.height
+                  }
                   color: sessionRow.selected
                     ? root.chip
                     : (sessionMouse.containsMouse
@@ -957,7 +1005,10 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.selectSession(sessionRow.modelData)
+                    onClicked: {
+                      sessionRow.forceActiveFocus(Qt.MouseFocusReason)
+                      root.selectSession(sessionRow.modelData)
+                    }
                   }
                 }
               }
@@ -977,6 +1028,7 @@ Item {
 
         // ---------------------------------------------------- the right pane
         Flickable {
+          id: paneScroll
           anchors.left: railRule.right
           anchors.leftMargin: Style.spacing.panelGap
           anchors.right: parent.right
@@ -986,10 +1038,12 @@ Item {
           contentWidth: width
           contentHeight: paneContent.implicitHeight
           clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          Controls.ScrollBar.vertical: ScrollHandle {}
 
           Column {
             id: paneContent
-            width: parent.width
+            width: Math.max(0, parent.width - Style.spacing.md * 2)
             spacing: Style.spacing.panelGap
 
             Column {
@@ -1019,31 +1073,38 @@ Item {
             }
 
             // ---------- Written values, in both modes ----------
-            Row {
+            Grid {
               id: totalsRow
               width: parent.width
-              spacing: Style.spacing.xxl
-              readonly property real cellWidth: (width - spacing * 3) / 4
+              columns: width < Style.space(560) ? 2 : 4
+              columnSpacing: Style.spacing.xl
+              rowSpacing: Style.spacing.lg
+              readonly property real cellWidth:
+                (width - columnSpacing * (columns - 1)) / columns
 
               TotalStat {
                 width: totalsRow.cellWidth
                 label: "Distance"
-                value: root.formatDistance(root.paneTotals.dist_km)
+                value: !root.sessionMode && (root.profileLoading || root.profileError !== "")
+                  ? "—" : root.formatDistance(root.paneTotals.dist_km)
               }
               TotalStat {
                 width: totalsRow.cellWidth
                 label: "Steps"
-                value: root.formatSteps(root.paneTotals.steps)
+                value: !root.sessionMode && (root.profileLoading || root.profileError !== "")
+                  ? "—" : root.formatSteps(root.paneTotals.steps)
               }
               TotalStat {
                 width: totalsRow.cellWidth
                 label: "Time"
-                value: root.formatDuration(root.paneTotals.dur_s)
+                value: !root.sessionMode && (root.profileLoading || root.profileError !== "")
+                  ? "—" : root.formatDuration(root.paneTotals.dur_s)
               }
               TotalStat {
                 width: totalsRow.cellWidth
                 label: "Average speed"
-                value: root.formatAverageSpeed(root.paneTotals.v_avg)
+                value: !root.sessionMode && (root.profileLoading || root.profileError !== "")
+                  ? "—" : root.formatAverageSpeed(root.paneTotals.v_avg)
               }
             }
 
@@ -1062,10 +1123,18 @@ Item {
               text: root.integrityNote
             }
 
+            SectionNote {
+              visible: !root.sessionMode && root.profileError === ""
+                && (root.profileLoading || root.profile.buckets.length === 0)
+              text: root.profileLoading ? "Loading walking history…"
+                : "No measured walking in this period. Recorded walks will appear here."
+            }
+
             // ---------- Period mode ----------
             Column {
               width: parent.width
-              visible: !root.sessionMode
+              visible: !root.sessionMode && !root.profileLoading
+                && root.profileError === "" && root.profile.buckets.length > 0
               spacing: Style.spacing.panelGap
 
               ChartFrame {
@@ -1094,8 +1163,8 @@ Item {
                   labelFontSize: Style.font.caption
                   valueUnit: "steps"
                   guideCount: 1
-                  axisStartLabel: root.formatClock(root.periodRangeStart)
-                  axisEndLabel: root.formatClock(root.periodRangeEnd)
+                  axisStartLabel: root.formatPeriodTime(root.periodRangeStart)
+                  axisEndLabel: root.formatPeriodTime(root.periodRangeEnd)
                 }
               }
 
@@ -1124,6 +1193,8 @@ Item {
                   plotHeight: Style.space(110)
                   axisHeight: Style.space(16)
                   lineWidth: Style.space(1)
+                  dashLength: Style.space(4)
+                  dashSpacing: Style.space(3)
                   fontFamily: root.fontFamily
                   labelFontSize: Style.font.caption
                   guideCount: 1
@@ -1131,8 +1202,8 @@ Item {
                     periodSpeedChart.valueRange, false, 1, " km/h")
                   maximumLabel: root.rangeLabel(
                     periodSpeedChart.valueRange, true, 1, " km/h")
-                  axisStartLabel: root.formatClock(root.periodRangeStart)
-                  axisEndLabel: root.formatClock(root.periodRangeEnd)
+                  axisStartLabel: root.formatPeriodTime(root.periodRangeStart)
+                  axisEndLabel: root.formatPeriodTime(root.periodRangeEnd)
                 }
               }
 
@@ -1239,6 +1310,14 @@ Item {
                 title: "Speed"
                 note: ""
 
+                Flow {
+                  width: parent.width
+                  spacing: Style.spacing.lg
+                  ChartKey { text: "Actual"; lineColor: root.foreground }
+                  ChartKey { text: "Commanded"; lineColor: root.accent }
+                  ChartKey { text: "Goal"; lineColor: root.muted; dashed: true }
+                }
+
                 WalkingpadTimeChart {
                   id: sessionSpeedChart
                   width: parent.width
@@ -1298,6 +1377,8 @@ Item {
                   plotHeight: Style.space(90)
                   axisHeight: Style.space(16)
                   lineWidth: Style.space(1)
+                  dashLength: Style.space(4)
+                  dashSpacing: Style.space(3)
                   fontFamily: root.fontFamily
                   labelFontSize: Style.font.caption
                   guideCount: 1
@@ -1392,7 +1473,7 @@ Item {
       text: stat.value
       color: root.foreground
       font.family: root.fontFamily
-      font.pixelSize: Style.font.title
+      font.pixelSize: Style.font.heading
       font.bold: true
       elide: Text.ElideRight
     }
@@ -1405,5 +1486,47 @@ Item {
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
     wrapMode: Text.WordWrap
+  }
+
+  component ScrollHandle: Controls.ScrollBar {
+    id: handle
+    policy: Controls.ScrollBar.AsNeeded
+    visible: size < 1
+    padding: Style.spacing.xxs
+    contentItem: Rectangle {
+      implicitWidth: Style.space(4)
+      implicitHeight: Style.space(24)
+      radius: Style.cornerRadius
+      color: handle.pressed ? root.accent : root.muted
+      opacity: handle.active ? 0.8 : 0.35
+    }
+  }
+
+  component ChartKey: Row {
+    id: legend
+    required property string text
+    required property color lineColor
+    property bool dashed: false
+    spacing: Style.spacing.sm
+
+    Row {
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: legend.dashed ? Style.space(3) : 0
+      Repeater {
+        model: legend.dashed ? 3 : 1
+        Rectangle {
+          width: legend.dashed ? Style.space(4) : Style.space(18)
+          height: Style.space(1)
+          color: legend.lineColor
+        }
+      }
+    }
+
+    Text {
+      text: legend.text
+      color: root.muted
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
   }
 }

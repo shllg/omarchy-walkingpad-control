@@ -31,8 +31,11 @@ plain, and no runtime dependency has appeared.
 
 ## Gate
 
-Require `bin/check-repo` to pass; it carries the QML lint. When QML is present,
-also require `omarchy plugin validate <repo>`.
+Require `bin/check-repo` to pass on an Omarchy machine; it carries the QML lint
+and validates the exported plugin tree. Do not validate this checkout directly:
+the ignored skill symlinks do not ship and would make the validator reject it.
+The gate exports tracked and non-ignored new files before invoking the Omarchy
+validator.
 
 ⚠ Do NOT invoke `qmllint` by bare name, and do not point `-I` at the shell
 directory alone. Both are traps that have already made a review report five

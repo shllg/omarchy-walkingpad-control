@@ -58,13 +58,13 @@ Item {
   property color muted
 
   // ------------------------------------------------------------ geometry
-  property real plotHeight: 90
-  property real axisHeight: 14
-  property real lineWidth: 1
-  property real dashLength: 4
-  property real dashSpacing: 3
-  property string fontFamily: "monospace"
-  property real labelFontSize: 9
+  required property real plotHeight
+  required property real axisHeight
+  required property real lineWidth
+  required property real dashLength
+  required property real dashSpacing
+  required property string fontFamily
+  required property real labelFontSize
   // Charts §3.3: a baseline, and at most two faint horizontal guides.
   property int guideCount: 0
 

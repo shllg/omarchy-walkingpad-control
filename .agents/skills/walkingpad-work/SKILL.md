@@ -13,8 +13,11 @@ safety model and plugin boundary, and passes the applicable completion gates.
 
 ## Completion gate
 
-Run `bin/check-repo`; it performs the structural checks, the QML lint and the
-test suite. Once QML exists, also run `omarchy plugin validate <repo>`.
+Run `bin/check-repo` on an Omarchy machine; it performs the structural checks,
+validates the exported plugin tree, runs QML lint, and runs the test suite.
+Do not validate this checkout directly: the ignored skill symlinks do not ship
+and would make the validator reject it. The gate exports tracked and non-ignored
+new files before invoking the Omarchy validator.
 
 ⚠ Do NOT invoke `qmllint` by bare name, and do not point `-I` at the shell
 directory alone. Both are traps that have already made a review report five

@@ -44,6 +44,7 @@ Panel {
   readonly property string mode: service ? service.mode : "unknown"
   readonly property real maxSpeed: service ? service.maxSpeed : 6.0
   readonly property real speedStep: service ? service.speedStep : 0.5
+  readonly property color muted: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.72)
 
   readonly property string stateLabel: service
     ? Model.stateLabel(linkState, beltState, hasStatus, ramping)
@@ -501,11 +502,11 @@ Panel {
 
             Text {
               text: root.stateLabel.toUpperCase()
-              color: Qt.darker(root.bar.foreground, 1.4)
+              color: root.muted
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
-              font.letterSpacing: 1.2
+              font.letterSpacing: Style.spaceReal(1.2)
               elide: Text.ElideRight
               width: parent.width
             }
@@ -533,11 +534,11 @@ Panel {
 
             Text {
               text: "KM/H"
-              color: Qt.darker(root.bar.foreground, 1.4)
+              color: root.muted
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
-              font.letterSpacing: 1.2
+              font.letterSpacing: Style.spaceReal(1.2)
               anchors.right: parent.right
             }
 
@@ -547,10 +548,10 @@ Panel {
             Text {
               text: "MAX " + Model.speedText(root.maxSpeed)
               color: root.bar.foreground
-              opacity: 0.45
+              opacity: 0.65
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
-              font.letterSpacing: 1.2
+              font.letterSpacing: Style.spaceReal(1.2)
               anchors.right: parent.right
             }
           }
@@ -567,7 +568,7 @@ Panel {
           text: root.instruction
           color: root.refusalIsFault
             ? Color.urgent
-            : (root.refusing ? Color.accent : Qt.darker(root.bar.foreground, 1.2))
+            : (root.refusing ? Color.accent : root.muted)
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -591,6 +592,23 @@ Panel {
               width: chartLoader.width
               spacing: Style.spacing.labelGap
 
+              // A persistent readout keeps the controls in place when the
+              // pointer or keyboard begins inspecting a minute.
+              Text {
+                width: parent.width
+                readonly property var bucket:
+                  root.chartCursorIndex >= 0
+                    && root.chartCursorIndex < root.chartBuckets.length
+                    ? root.chartBuckets[root.chartCursorIndex] : null
+                text: bucket === null ? "Steps per minute · last hour"
+                  : root.clockText(bucket.t) + "  ·  "
+                    + Math.round(bucket.value) + " steps"
+                color: root.muted
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+
               WalkingpadBarChart {
                 id: stepChart
                 width: parent.width
@@ -605,7 +623,7 @@ Panel {
 
                 fg: root.bar.foreground
                 accent: Color.accent
-                muted: Qt.darker(root.bar.foreground, 1.4)
+                muted: root.muted
 
                 // Every dimension enters through Style, so the compact popup
                 // proportions survive Omarchy's live spacing and font scales
@@ -633,20 +651,15 @@ Panel {
                   root.cursorZone = "chart"
                   root.chartCursorIndex = index
                 }
-              }
 
-              Text {
-                width: parent.width
-                readonly property var bucket:
-                  root.chartCursorIndex >= 0
-                    && root.chartCursorIndex < root.chartBuckets.length
-                    ? root.chartBuckets[root.chartCursorIndex] : null
-                visible: bucket !== null
-                text: bucket === null ? "" : root.clockText(bucket.t)
-                  + "  ·  " + Math.round(bucket.value) + " steps"
-                color: Qt.darker(root.bar.foreground, 1.4)
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.caption
+                Text {
+                  anchors.centerIn: parent
+                  visible: root.chartBuckets.length === 0
+                  text: "No recent walking recorded"
+                  color: root.muted
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
               }
             }
           }
@@ -719,6 +732,7 @@ Panel {
               horizontalPadding: Style.spacing.controlPaddingX
               verticalPadding: Style.spacing.xxs
               hasCursor: root.cursorZone === "stats"
+              tooltipText: "Open walking history"
               onClicked: root.invoke("analysis")
               onHovered: function(h) {
                 if (!h) return
@@ -740,7 +754,7 @@ Panel {
 
             Item {
               width: parent.width
-              implicitHeight: speedField.implicitHeight
+              implicitHeight: Math.max(speedField.implicitHeight, applySpeed.implicitHeight)
 
               InfoLabel {
                 text: "Set speed"
@@ -755,8 +769,26 @@ Panel {
                 opacity: 0.6
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.bodySmall
+                anchors.right: applySpeed.left
+                anchors.rightMargin: Style.spacing.md
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Button {
+                id: applySpeed
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
+                text: "Apply"
+                Accessible.role: Accessible.Button
+                Accessible.name: "Apply speed"
+                Accessible.onPressAction: root.applyEditor()
+                fontSize: Style.font.bodySmall
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                bordered: true
+                enabled: isFinite(root.editorTyped)
+                opacity: enabled ? 1 : 0.5
+                onClicked: root.applyEditor()
               }
 
               TextField {
@@ -804,7 +836,7 @@ Panel {
               // window doing its job, not a fault (spec §5.5).
               color: root.editorClamps
                 ? Color.accent
-                : Qt.darker(root.bar.foreground, 1.4)
+                : root.muted
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap

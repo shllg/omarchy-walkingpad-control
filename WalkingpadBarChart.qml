@@ -45,15 +45,15 @@ Item {
   property color muted
 
   // ------------------------------------------------------------ geometry
-  property real plotHeight: 60
-  property real axisHeight: 14
-  property real barSpacing: 1
+  required property real plotHeight
+  required property real axisHeight
+  required property real barSpacing
   // Charts §3.4: ten bars must look like ten bars, not ten billboards.
-  property real maxBarWidth: 18
-  property real cornerRadius: 0
-  property real lineWidth: 1
-  property string fontFamily: "monospace"
-  property real labelFontSize: 9
+  required property real maxBarWidth
+  required property real cornerRadius
+  required property real lineWidth
+  required property string fontFamily
+  required property real labelFontSize
   // Charts §3.3: no box around the plot -- a baseline, and at most two faint
   // horizontal guides.
   property int guideCount: 0
