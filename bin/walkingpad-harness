@@ -47,6 +47,11 @@ offscreen=0
 timeout_s=0
 mode="period"
 period="day"
+check_mode=0
+check_group="all"
+fake_service=0
+real_store=0
+screen=""
 
 usage() {
   cat >&2 <<'USAGE'
@@ -57,13 +62,19 @@ usage: walkingpad-harness [--panel|--window] [--store DIR] [--offscreen] [--time
   --store DIR   history store to read; the directory itself, ending in
                 .../walkingpad. Default: a fresh synthetic one, discarded on exit.
   --real-store  read the REAL history instead of a synthetic one
+  --fake-service render a connected synthetic pad; commands are only recorded
+  --check [GROUP] run behavioral assertions and exit nonzero on any failure
+                or timeout. GROUP: all (default), refresh, navigation, notices.
+                Requires Wayland and QtTest; always uses a fresh synthetic store.
+                Use --panel --check for Apply, Escape and chart command checks.
+  --screen NAME render on an existing Wayland output, without changing outputs
   --offscreen   parse and resolve types only, with no window. Cannot reach
                 data or bindings: PanelWindow needs the Wayland backend.
   --timeout N   exit after N seconds instead of running until closed
   --mode M      period (default) or session. Charts §2 keeps the two from
                 competing, so they are separate modes and each needs rendering.
                 session selects the newest one, which offscreen cannot click.
-  --period P    day (default), week or month
+  --period P    day (default), week, month or all
 USAGE
   exit 2
 }
@@ -73,7 +84,16 @@ while [[ $# -gt 0 ]]; do
     --window) target="window"; shift ;;
     --panel) target="panel"; shift ;;
     --store) store=${2:-}; [[ -n $store ]] || usage; shift 2 ;;
-    --real-store) store="${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad"; shift ;;
+    --real-store) store="${XDG_STATE_HOME:-$HOME/.local/state}/walkingpad"; real_store=1; shift ;;
+    --fake-service) fake_service=1; shift ;;
+    --check)
+      check_mode=1; fake_service=1; shift
+      if [[ $# -gt 0 && $1 != --* ]]; then
+        check_group=$1
+        [[ $check_group == all || $check_group == refresh || $check_group == navigation || $check_group == notices ]] || usage
+        shift
+      fi ;;
+    --screen) screen=${2:-}; [[ -n $screen ]] || usage; shift 2 ;;
     --offscreen) offscreen=1; shift ;;
     --mode) mode=${2:-}; [[ $mode == period || $mode == session ]] || usage; shift 2 ;;
     --period) period=${2:-}; [[ -n $period ]] || usage; shift 2 ;;
@@ -82,6 +102,18 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
 done
+
+if [[ $check_mode -eq 1 ]]; then
+  [[ $offscreen -eq 0 ]] || { echo "harness: --check cannot be combined with --offscreen" >&2; exit 2; }
+  [[ $real_store -eq 0 ]] || { echo "harness: --check cannot be combined with --real-store" >&2; exit 2; }
+  [[ -z $store ]] || { echo "harness: --check always creates its own synthetic store" >&2; exit 2; }
+  [[ -n ${WAYLAND_DISPLAY:-} && ${QT_QPA_PLATFORM:-wayland} != offscreen ]] || {
+    echo "harness: --check requires a Wayland display; offscreen cannot run behavior" >&2; exit 2;
+  }
+  [[ $target == window || $check_group == all ]] || usage
+  [[ $timeout_s != 0 ]] || timeout_s=40
+fi
+[[ $timeout_s =~ ^[0-9]+$ ]] || usage
 
 command -v qs >/dev/null 2>&1 || { echo "harness: FAIL — qs (quickshell) is not installed" >&2; exit 1; }
 omarchy_shell=${OMARCHY_PATH:-/usr/share/omarchy}/shell
@@ -114,6 +146,49 @@ XDG_STATE_HOME=$(dirname "$store")
 
 if [[ $offscreen -eq 1 ]]; then
   export QT_QPA_PLATFORM=offscreen
+fi
+
+if [[ $check_mode -eq 1 || $fake_service -eq 1 || -n $screen ]]; then
+  # Keep the Wayland socket usable while giving this process its own Quickshell
+  # runtime and IPC namespace. No query can accidentally find the live shell.
+  if [[ -n ${WAYLAND_DISPLAY:-} && $WAYLAND_DISPLAY != /* ]]; then
+    [[ -n ${XDG_RUNTIME_DIR:-} ]] || { echo "harness: XDG_RUNTIME_DIR is needed for a relative Wayland socket" >&2; exit 2; }
+    export WAYLAND_DISPLAY="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+  fi
+  mkdir -m 700 "$root/runtime"
+  export XDG_RUNTIME_DIR="$root/runtime"
+  export QS_DISABLE_FILE_WATCHER=1
+  export WALKINGPAD_HARNESS_TARGET="$target" WALKINGPAD_HARNESS_REPO="$repo"
+  export WALKINGPAD_HARNESS_CHECK="$check_mode" WALKINGPAD_HARNESS_FAKE="$fake_service"
+  export WALKINGPAD_HARNESS_SCREEN="$screen" WALKINGPAD_HARNESS_PERIOD="$period"
+  export WALKINGPAD_HARNESS_MODE="$mode"
+  # The support file is loaded by absolute URL, just like production. Nothing
+  # copies or transforms a production QML file to make these assertions pass.
+  cat > "$root/harness.qml" <<'QML'
+import Quickshell
+import QtQuick
+ShellRoot {
+  Loader {
+    source: "file://" + Quickshell.env("WALKINGPAD_HARNESS_REPO") + "/tests/ui/Harness.qml"
+    onStatusChanged: if (status === Loader.Error) {
+      console.error("harness: FAIL — test support failed to load")
+      Qt.quit()
+    }
+  }
+}
+QML
+  if [[ $check_mode -eq 1 ]]; then
+    /usr/bin/python3 "$repo/tests/ui/check.py" "$root/harness.qml" "$target" \
+      --timeout "$timeout_s" --group "$check_group"
+    exit $?
+  fi
+  if [[ $timeout_s -gt 0 ]]; then
+    timeout "$timeout_s" qs -p "$root/harness.qml" || status=$?
+    [[ ${status:-0} -eq 0 || ${status:-0} -eq 124 ]] || exit "$status"
+  else
+    qs -p "$root/harness.qml"
+  fi
+  exit 0
 fi
 
 # The stub `shell` and `manifest` stand in for what the bar and the plugin loader

@@ -82,6 +82,7 @@ Item {
   property var verifyResult: null
   property var sessions: []
   property string sessionsError: ""
+  property int sessionsSkippedRows: 0
 
   // Charts §2.1: selecting a session swaps the right pane, and selecting a
   // period clears the session. Exactly one of these two states is live.
@@ -90,10 +91,16 @@ Item {
   property var detailSamples: []
   property bool detailLoaded: false
   property string detailError: ""
+  property int detailSkippedRows: 0
 
   readonly property bool sessionMode: root.selectedSessionStart !== null
   readonly property bool profileLoading: profileProc.running || profileProc.queued
   readonly property bool sessionsLoading: sessionsProc.running || sessionsProc.queued
+  readonly property bool historyLoading: root.profileLoading || root.sessionsLoading
+    || verifyProc.running || verifyProc.queued
+    || (root.sessionMode && (sessionProc.running || sessionProc.queued))
+  readonly property bool historyHasError: root.profileError !== ""
+    || root.sessionsError !== "" || (root.sessionMode && root.detailError !== "")
 
   // ------------------------------------------------------------- formatting
   function finiteNumber(value) {
@@ -288,14 +295,40 @@ Item {
   // could have told anyone. `walkingpad-stats verify` holds the stored bouts
   // against the raw counters in samples/, and this is where it says so.
   readonly property string integrityNote: {
-    if (root.verifyResult === null) return ""
-    var missing = root.numeric(root.verifyResult.missing_steps)
-    if (!(missing > 0)) return ""
-    var days = root.numeric(root.verifyResult.days_mismatched)
-    return "⚠ " + root.formatSteps(missing) + " steps the pad counted are "
-      + "missing from history on " + days + (days === 1 ? " day" : " days")
-      + ". They are still in the stored counters — recover them with "
-      + root.repairPath + " --apply"
+    var notes = []
+    var audit = root.verifyResult
+    if (audit !== null) {
+      var missingSteps = root.numeric(audit.missing_steps)
+      var missingSeconds = root.numeric(audit.missing_dur_s)
+      var amounts = []
+      if (missingSteps > 0) amounts.push(root.formatSteps(missingSteps) + " steps")
+      if (missingSeconds > 0) {
+        amounts.push(root.formatDuration(missingSeconds) + " of walking time")
+      }
+      if (amounts.length > 0) {
+        notes.push("Across saved history, totals are missing " + amounts.join(" and ")
+          + " reported by the pad. Check for recoverable gaps with "
+          + root.repairPath + "; use --apply to save a repair.")
+      } else if (root.numeric(audit.days_mismatched) > 0) {
+        notes.push("Across saved history, some totals differ from the recorded counters.")
+      }
+      var unchecked = root.numeric(audit.days_unchecked)
+      if (unchecked > 0) {
+        notes.push("Across saved history, " + root.formatSteps(unchecked)
+          + (unchecked === 1 ? " day" : " days")
+          + " could not be checked against recorded samples.")
+      }
+    }
+    // Every query can count the same unreadable bout or file. The largest count
+    // is a lower bound, not a sum of independent records (stats query contract).
+    var skipped = Math.max(root.sessionsSkippedRows, root.detailSkippedRows,
+      root.numeric(root.profile.skipped_rows), audit ? root.numeric(audit.skipped_rows) : 0)
+    if (skipped > 0) {
+      notes.push("Across saved history, at least " + root.formatSteps(skipped)
+        + (skipped === 1 ? " record or file could" : " records or files could")
+        + " not be read. Totals or charts may be incomplete.")
+    }
+    return notes.join("\n")
   }
 
   readonly property real periodBucketSeconds:
@@ -420,11 +453,27 @@ Item {
 
   function refreshVerify() {
     if (!root.opened) return
-    // No queueing and no period arguments: it audits the whole store, so one
-    // in flight is always still the answer to the question being asked.
-    if (verifyProc.running) return
+    if (verifyProc.running) {
+      verifyProc.queued = true
+      return
+    }
+    verifyProc.queued = false
     verifyProc.requestEpoch = root.refreshEpoch
     verifyProc.running = true
+  }
+
+  function refreshHistory() {
+    if (!root.opened) return
+    // Invalidate older answers without clearing the view's selection or scroll.
+    // Each running query coalesces requests into one read for the latest epoch.
+    root.refreshEpoch++
+    root.profileError = ""
+    root.sessionsError = ""
+    root.detailError = ""
+    root.refreshProfile()
+    root.refreshSessions()
+    root.refreshVerify()
+    root.refreshSessionDetail()
   }
 
   function refreshSessionDetail() {
@@ -445,27 +494,57 @@ Item {
         || requestPeriod !== root.period) return
     var result = root.parseStatsOutput(
       text, "The session history could not be read.")
+    var focusedStart = null
+    var focusedIndex = -1
+    for (var i = 0; i < sessionRepeater.count; ++i) {
+      var row = sessionRepeater.itemAt(i)
+      if (row && row.activeFocus) {
+        focusedStart = row.modelData.start
+        focusedIndex = i
+        break
+      }
+    }
     if (!result.ok) {
+      if (focusedIndex >= 0) analysisCard.forceActiveFocus(Qt.OtherFocusReason)
       root.sessions = []
       root.sessionsError = result.message
+      root.sessionsSkippedRows = 0
       return
     }
     if (!Array.isArray(result.value.sessions)) {
+      if (focusedIndex >= 0) analysisCard.forceActiveFocus(Qt.OtherFocusReason)
       root.sessions = []
       root.sessionsError = "The session history has an unexpected shape."
+      root.sessionsSkippedRows = 0
       return
     }
     root.sessionsError = ""
+    root.sessionsSkippedRows = root.numeric(result.value.skipped_rows)
+    var scrollY = sessionScroll.contentY
     var ordered = result.value.sessions.slice()
     ordered.sort(function(a, b) { return root.numeric(b.start) - root.numeric(a.start) })
     root.sessions = ordered
     // A regrouped list may no longer contain the selected session at all, and a
     // pane titled for a session the rail cannot show is exactly the ambiguity
     // charts §2.1 removes.
-    if (root.sessionMode && root.sessionAt(root.selectedSessionStart) === null
-        && root.detailSession === null) {
+    if (root.sessionMode && root.sessionAt(root.selectedSessionStart) === null) {
       root.clearSession()
     }
+    Qt.callLater(function() {
+      if (!root.opened || requestEpoch !== root.refreshEpoch
+          || requestPeriod !== root.period || requestGap !== root.gapMinutes) return
+      sessionScroll.contentY = Math.max(0, Math.min(scrollY,
+        sessionScroll.contentHeight - sessionScroll.height))
+      if (focusedIndex < 0) return
+      for (var i = 0; i < root.sessions.length; ++i) {
+        if (Number(root.sessions[i].start) === Number(focusedStart)) {
+          root.focusSession(i)
+          return
+        }
+      }
+      if (root.sessions.length > 0) root.focusSession(focusedIndex)
+      else analysisCard.forceActiveFocus(Qt.OtherFocusReason)
+    })
   }
 
   function handleProfile(text, requestPeriod, requestGap, requestEpoch) {
@@ -509,6 +588,7 @@ Item {
       root.detailSession = null
       root.detailLoaded = false
       root.detailError = result.message
+      root.detailSkippedRows = 0
       return
     }
     if (!Array.isArray(result.value.samples) || !result.value.session) {
@@ -516,11 +596,13 @@ Item {
       root.detailSession = null
       root.detailLoaded = false
       root.detailError = "The selected session has an unexpected shape."
+      root.detailSkippedRows = 0
       return
     }
     root.detailError = ""
     root.detailSession = result.value.session
     root.detailSamples = result.value.samples
+    root.detailSkippedRows = root.numeric(result.value.skipped_rows)
     root.detailLoaded = true
   }
 
@@ -548,6 +630,7 @@ Item {
     root.profileError = ""
     root.sessions = []
     root.sessionsError = ""
+    root.sessionsSkippedRows = 0
     root.refreshProfile()
     root.refreshSessions()
     root.refreshVerify()
@@ -560,7 +643,15 @@ Item {
     root.detailSamples = []
     root.detailLoaded = false
     root.detailError = ""
+    root.detailSkippedRows = 0
     root.refreshSessionDetail()
+  }
+
+  function focusSession(index) {
+    if (sessionRepeater.count === 0) return
+    var bounded = Math.max(0, Math.min(sessionRepeater.count - 1, index))
+    var row = sessionRepeater.itemAt(bounded)
+    if (row) row.forceActiveFocus(Qt.TabFocusReason)
   }
 
   function clearSession() {
@@ -569,6 +660,8 @@ Item {
     root.detailSamples = []
     root.detailLoaded = false
     root.detailError = ""
+    root.detailSkippedRows = 0
+    sessionProc.queued = false
   }
 
   function open(payloadJson) {
@@ -581,8 +674,10 @@ Item {
     root.period = "day"
     root.profile = root.emptyProfile()
     root.profileError = ""
+    root.verifyResult = null
     root.sessions = []
     root.sessionsError = ""
+    root.sessionsSkippedRows = 0
     root.clearSession()
     root.opened = true
     root.refreshProfile()
@@ -614,6 +709,7 @@ Item {
     if (!root.opened) return
     root.sessions = []
     root.sessionsError = ""
+    root.sessionsSkippedRows = 0
     root.clearSession()
     root.refreshSessions()
   }
@@ -677,10 +773,14 @@ Item {
   Process {
     id: verifyProc
     property int requestEpoch: 0
+    property bool queued: false
     command: [root.statsPath, "verify"]
     stdout: StdioCollector { id: verifyOut; waitForEnd: true }
     onExited: function() {
       root.handleVerify(verifyOut.text, requestEpoch)
+      if (queued || requestEpoch !== root.refreshEpoch) {
+        Qt.callLater(function() { root.refreshVerify() })
+      }
     }
   }
 
@@ -709,6 +809,7 @@ Item {
 
   PanelWindow {
     id: analysisPanel
+    objectName: "analysisPanel"
     visible: root.opened
     anchors { top: true; bottom: true; left: true; right: true }
     color: Qt.rgba(root.background.r, root.background.g, root.background.b, 0)
@@ -729,6 +830,7 @@ Item {
 
     BorderSurface {
       id: analysisCard
+      objectName: "analysisCard"
       width: Math.min(parent.width * 0.82, Style.space(1800))
       height: Math.min(parent.height * 0.88, Style.space(1300))
       anchors.centerIn: parent
@@ -742,6 +844,12 @@ Item {
       Keys.onEscapePressed: function(event) {
         root.dismiss()
         event.accepted = true
+      }
+      Keys.onPressed: function(event) {
+        if (event.key === Qt.Key_F5) {
+          if (!event.isAutoRepeat) root.refreshHistory()
+          event.accepted = true
+        }
       }
 
       // The full-screen dismiss target sits behind the card. This catcher
@@ -762,12 +870,12 @@ Item {
           anchors.left: parent.left
           anchors.right: parent.right
           implicitHeight: Math.max(windowTitle.implicitHeight,
-                                   closeButton.implicitHeight)
+                                   titleActions.implicitHeight)
 
           Text {
             id: windowTitle
             anchors.left: parent.left
-            anchors.right: closeButton.left
+            anchors.right: titleActions.left
             anchors.rightMargin: Style.spacing.lg
             anchors.verticalCenter: parent.verticalCenter
             text: "WalkingPad · History"
@@ -778,21 +886,45 @@ Item {
             elide: Text.ElideRight
           }
 
-          Button {
-            id: closeButton
+          Row {
+            id: titleActions
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: "✕"
-            tooltipText: "Close history (Esc)"
-            focusable: true
-            Accessible.role: Accessible.Button
-            Accessible.name: "Close history"
-            Accessible.onPressAction: root.dismiss()
-            fontSize: Style.font.body
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.dismiss()
+            spacing: Style.spacing.sm
+
+            Button {
+              id: refreshHistoryButton
+              objectName: "refreshHistoryButton"
+              text: root.historyLoading ? "Refreshing…"
+                : (root.historyHasError ? "Retry" : "Refresh")
+              tooltipText: "Refresh history (F5)"
+              enabled: !root.historyLoading
+              opacity: enabled ? 1 : 0.65
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Refresh history"
+              Accessible.onPressAction: root.refreshHistory()
+              fontSize: Style.font.body
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.refreshHistory()
+            }
+
+            Button {
+              id: closeButton
+              text: "✕"
+              tooltipText: "Close history (Esc)"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Close history"
+              Accessible.onPressAction: root.dismiss()
+              fontSize: Style.font.body
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onClicked: root.dismiss()
+            }
           }
         }
 
@@ -904,6 +1036,7 @@ Item {
 
           Flickable {
             id: sessionScroll
+            objectName: "sessionList"
             anchors.top: sessionsHeader.bottom
             anchors.topMargin: Style.spacing.sm
             anchors.left: parent.left
@@ -932,11 +1065,14 @@ Item {
               }
 
               Repeater {
+                id: sessionRepeater
                 model: root.sessions
 
                 BorderSurface {
                   id: sessionRow
                   required property var modelData
+                  required property int index
+                  objectName: "sessionRow_" + sessionRow.index
                   readonly property bool selected: root.sessionMode
                     && Number(sessionRow.modelData.start)
                       === Number(root.selectedSessionStart)
@@ -955,6 +1091,17 @@ Item {
                   Keys.onReturnPressed: root.selectSession(sessionRow.modelData)
                   Keys.onEnterPressed: root.selectSession(sessionRow.modelData)
                   Keys.onSpacePressed: root.selectSession(sessionRow.modelData)
+                  Keys.onUpPressed: root.focusSession(sessionRow.index - 1)
+                  Keys.onDownPressed: root.focusSession(sessionRow.index + 1)
+                  Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Home) {
+                      root.focusSession(0)
+                      event.accepted = true
+                    } else if (event.key === Qt.Key_End) {
+                      root.focusSession(sessionRepeater.count - 1)
+                      event.accepted = true
+                    }
+                  }
                   onActiveFocusChanged: {
                     if (!activeFocus) return
                     if (y < sessionScroll.contentY) sessionScroll.contentY = y
@@ -1029,6 +1176,7 @@ Item {
         // ---------------------------------------------------- the right pane
         Flickable {
           id: paneScroll
+          objectName: "historyPane"
           anchors.left: railRule.right
           anchors.leftMargin: Style.spacing.panelGap
           anchors.right: parent.right
@@ -1125,7 +1273,7 @@ Item {
 
             SectionNote {
               visible: !root.sessionMode && root.profileError === ""
-                && (root.profileLoading || root.profile.buckets.length === 0)
+                && root.profile.buckets.length === 0
               text: root.profileLoading ? "Loading walking history…"
                 : "No measured walking in this period. Recorded walks will appear here."
             }
@@ -1133,8 +1281,8 @@ Item {
             // ---------- Period mode ----------
             Column {
               width: parent.width
-              visible: !root.sessionMode && !root.profileLoading
-                && root.profileError === "" && root.profile.buckets.length > 0
+              visible: !root.sessionMode && root.profileError === ""
+                && root.profile.buckets.length > 0
               spacing: Style.spacing.panelGap
 
               ChartFrame {
