@@ -17,3 +17,6 @@ AGENTS.local.md
 # them with bin/link-skills.
 .claude/skills/
 .codex/skills/
+
+# Machine-local MCP client config
+.mcp.json
