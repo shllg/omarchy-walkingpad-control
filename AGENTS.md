@@ -142,6 +142,7 @@ already caused, or nearly caused, a wrong design decision.
   SHAs still answered 200 on GitHub afterwards, so the cleanup needed a support
   request on top. `tests/test_no_pii.py` guards this; it fails the suite on any
   MAC-shaped string in a tracked file. Treat that failure as a stop, not a lint.
+- **Never commit or push on your own.** Hand back a suggested commit message instead.
 - **Plain constructs only.** No metaprogramming, no clever async beyond the poll loop.
   Comments explain *why* and cite the measured fact they rest on (ADR D-1).
 - **Safety is not optional.** As fact 16 records, stop is gated on recent evidence
